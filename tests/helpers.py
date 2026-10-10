@@ -11,5 +11,6 @@ def config(root: Path, **changes):
                "telegram_channel_id": -1004472119156, "bale_channel_id": 5716375015,
                "database_path": root / "state.sqlite3", "reports_dir": root / "reports",
                "retry_base": 0.001, "request_timeout": 1}
+    options["moderation_enabled"] = False
     options.update(changes)
     return Config(**options)

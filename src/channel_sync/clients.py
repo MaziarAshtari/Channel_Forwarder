@@ -46,7 +46,8 @@ class BotClient:
 
     def __init__(self, token: str, config: Config, *, transport=None, sleeper=asyncio.sleep):
         self.config = config
-        self.redactor = Redactor(config.telegram_token, config.bale_token, config.telegram_proxy_url)
+        self.redactor = Redactor(config.telegram_token, config.bale_token, config.telegram_proxy_url,
+                                 config.typesafe_api_key)
         self._base_url = f"{self.host}/bot{token}"
         self._file_url = f"{self.host}/file/bot{token}"
         self.http = make_http_client(config, self.platform, transport=transport)
@@ -61,7 +62,7 @@ class BotClient:
     async def aclose(self):
         await self.http.aclose()
 
-    async def call(self, method: str, params: dict | None = None, *, files=None) -> dict:
+    async def call(self, method: str, params: dict | None = None, *, files=None, record_attempts=True) -> dict:
         """Return the complete API envelope; never retry ambiguous writes."""
         if not method.isascii() or not method.isalnum():
             raise ValueError("Invalid API method.")
@@ -85,7 +86,8 @@ class BotClient:
                     kwargs["json"] = params
                 response = await self.http.post(f"{self._base_url}/{method}", **kwargs)
             except httpx.TransportError as exc:
-                self._record_attempt(method, attempt, transport_error=type(exc).__name__)
+                if record_attempts:
+                    self._record_attempt(method, attempt, transport_error=type(exc).__name__)
                 error = ApiError(self.platform, method, f"Transport failure ({type(exc).__name__})",
                                  temporary=True, uncertain=not is_read)
                 retry = is_read
@@ -94,8 +96,9 @@ class BotClient:
                     envelope = response.json()
                 except ValueError:
                     envelope = None
-                self._record_attempt(method, attempt, http_status=response.status_code,
-                                     response=envelope if envelope is not None else {"body": response.text})
+                if record_attempts:
+                    self._record_attempt(method, attempt, http_status=response.status_code,
+                                         response=envelope if envelope is not None else {"body": response.text})
                 valid = isinstance(envelope, dict) and isinstance(envelope.get("ok"), bool)
                 if response.is_success and valid and envelope["ok"] and "result" in envelope:
                     return envelope
@@ -141,14 +144,20 @@ class BotClient:
             params["offset"] = offset
         if self.platform == "telegram":
             params["allowed_updates"] = ["channel_post"]
+            if self.config.moderation_enabled:
+                params["allowed_updates"].append("message")
         # Bale's allowed_updates is undocumented; do not send it.
         return await self.call("getUpdates", params)
 
-    async def send_message(self, chat_id: int, text: str, *, entities: list | None = None):
+    async def send_message(self, chat_id: int, text: str, *, entities: list | None = None, record_attempts=True):
         params = {"chat_id": chat_id, "text": text}
         if entities:
             params["entities"] = entities
-        return await self.call("sendMessage", params)
+        return await self.call("sendMessage", params, record_attempts=record_attempts)
+
+    async def delete_message(self, chat_id: int, message_id: int):
+        # Use the existing conservative write retries: ambiguous deletes are audited.
+        return await self.call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
 
     @staticmethod
     def validate_upload(content: bytes, *, photo: bool = False):
@@ -242,7 +251,7 @@ class BaleClient(BotClient):
     platform = "bale"
     host = "https://tapi.bale.ai"
 
-    async def send_message(self, chat_id: int, text: str, *, entities: list | None = None):
+    async def send_message(self, chat_id: int, text: str, *, entities: list | None = None, record_attempts=True):
         if entities:
             raise ValueError("Bale text uses inline Markdown; Telegram entities are unsupported here.")
-        return await super().send_message(chat_id, text)
+        return await super().send_message(chat_id, text, record_attempts=record_attempts)

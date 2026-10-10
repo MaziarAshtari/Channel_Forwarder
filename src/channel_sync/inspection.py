@@ -9,6 +9,7 @@ from .clients import ApiError, BotClient
 from .config import Config
 from .health import health
 from .messages import content_signature, extract_message, own_author, utf16_length
+from .moderation import Moderator
 from .redaction import Redactor
 from .reports import save_report
 from .store import CircuitOpen, Store
@@ -107,7 +108,8 @@ def analyze_echoes(report: dict) -> dict:
 async def inspect_echo(config: Config, clients: dict[str, BotClient], store: Store,
                        output: Path, *, observation_seconds: float = 60) -> dict:
     run_id = uuid.uuid4().hex[:12]
-    redactor = Redactor(config.telegram_token, config.bale_token, config.telegram_proxy_url)
+    redactor = Redactor(config.telegram_token, config.bale_token, config.telegram_proxy_url,
+                        config.typesafe_api_key)
     channel_ids = {"telegram": config.telegram_channel_id, "bale": config.bale_channel_id}
     report = {"schema_version": 1, "run_id": run_id, "started_at": utc_now(),
               "status": "starting", "dry_run": config.dry_run, "observation_seconds": observation_seconds,
@@ -124,7 +126,7 @@ async def inspect_echo(config: Config, clients: dict[str, BotClient], store: Sto
         report["note"] = "No API calls or sends. Set DRY_RUN=false in .env for the live diagnostic."
         checkpoint()
         return report
-    report["health"] = await health(clients, channel_ids)
+    report["health"] = await health(clients, channel_ids, check_moderation=False)
     checkpoint()
     if not report["health"]["ok"]:
         report["status"] = "health_failed"
@@ -147,6 +149,10 @@ async def inspect_echo(config: Config, clients: dict[str, BotClient], store: Sto
             report["error"] = f"{platform} has a webhook. Use dedicated test bots with polling."
             checkpoint()
             return report
+    moderator = Moderator(config, clients["telegram"], store)
+    telegram_health = next(item for item in report["health"]["bots"] if item["platform"] == "telegram")
+    report["moderation"] = await moderator.prepare(telegram_health)
+    store.recover_moderation()
     report["status"] = "polling"
     checkpoint()
     previous_recorders = {platform: client.attempt_recorder for platform, client in clients.items()}
@@ -181,6 +187,8 @@ async def inspect_echo(config: Config, clients: dict[str, BotClient], store: Sto
                 data["updates"].extend({"received_at": received, "update": update} for update in updates)
                 checkpoint()
                 store.ingest(platform, scope, updates)
+                for update in updates:
+                    await moderator.handle(platform, update)
                 if first:
                     data["polling_ready_at"] = utc_now()
                     checkpoint()
@@ -273,6 +281,7 @@ async def inspect_echo(config: Config, clients: dict[str, BotClient], store: Sto
         for task in [*tasks, ready_task, failure_task]:
             task.cancel()
         await asyncio.gather(*tasks, ready_task, failure_task, return_exceptions=True)
+        await moderator.aclose()
         for platform, client in clients.items():
             client.attempt_recorder = previous_recorders[platform]
         report["finished_at"] = utc_now()

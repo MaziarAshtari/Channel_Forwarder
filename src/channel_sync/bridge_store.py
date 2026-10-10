@@ -14,6 +14,12 @@ class BridgeStore(Store):
             "ORDER BY p.update_id", (platform, SCOPE),
         ).fetchall()
 
+    def mark_moderated(self, platform, update_id):
+        self.connection.execute(
+            "UPDATE processed_updates SET status='processed' WHERE platform=? AND scope=? AND update_id=?",
+            (platform, SCOPE, update_id),
+        )
+
     def route(self, *, platform, update_id, message, encoded_message, signature, own, enabled,
               baseline=False, album_wait=3, now=None):
         now = time.time() if now is None else now
@@ -143,5 +149,6 @@ class BridgeStore(Store):
     def snapshot(self):
         return {"jobs": list(reversed([dict(row) for row in self.connection.execute("SELECT * FROM bridge_jobs ORDER BY created_at DESC,job_key DESC LIMIT 1000")])),
                 "job_counts": dict(self.connection.execute("SELECT state,COUNT(*) FROM bridge_jobs GROUP BY state")),
+                "moderation_counts": dict(self.connection.execute("SELECT action,COUNT(*) FROM moderation_decisions GROUP BY action")),
                 "circuits": [dict(row) for row in self.connection.execute("SELECT * FROM direction_circuits")],
                 "pending_echo_items": self.connection.execute("SELECT COALESCE(SUM(remaining),0) FROM pending_echoes WHERE expires_at>=?", (time.time(),)).fetchone()[0]}

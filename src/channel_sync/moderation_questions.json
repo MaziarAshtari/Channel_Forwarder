@@ -1,0 +1,8 @@
+{
+  "is_profanity": {"type": "noul", "instructions": "Does `comment` contain profanity, insults, or abusive language?", "criteria": {"true": "Contains swear words, insults, slurs, harassment, or personal attacks (in any language, including Persian/Finglish).", "false": "Polite or neutral language, even if critical or disagreeing."}},
+  "is_advertising": {"type": "noul", "instructions": "Is `comment` advertising or self-promotion unrelated to `channel_topic`?", "criteria": {"true": "Promotes products, channels, bots, links, money-making, crypto, or services.", "false": "No promotion; a genuine reaction, question, or discussion."}},
+  "is_sexual": {"type": "noul", "instructions": "Does `comment` contain sexual or adult content?", "criteria": {"true": "Sexual language, adult content, dating/escort offers, or explicit innuendo.", "false": "No sexual or adult content."}},
+  "is_scam_or_phishing": {"type": "noul", "instructions": "Is `comment` a scam or phishing attempt?", "criteria": {"true": "Fake giveaways, requests for personal info, suspicious links, impersonation, or too-good-to-be-true offers.", "false": "No deceptive intent."}},
+  "is_hate_or_threat": {"type": "noul", "instructions": "Does `comment` contain hate speech, threats, or violence?", "criteria": {"true": "Targets groups by ethnicity, religion, gender, etc., or threatens/encourages violence.", "false": "No hate or threats."}},
+  "should_delete": {"type": "noul", "instructions": "Overall, should `comment` be deleted from a Telegram channel about `channel_topic`?", "criteria": {"true": "Comment is profane, promotional, sexual, scam, hateful, or clearly spam.", "false": "Comment is acceptable, even if negative or off-topic."}}
+}

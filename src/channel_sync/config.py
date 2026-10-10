@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+import math
 import re
 from urllib.parse import urlsplit
 
@@ -31,6 +32,16 @@ class Config:
     circuit_window: int = 60
     circuit_max_sends: int = 20
     album_wait: float = 3
+    moderation_enabled: bool = True
+    typesafe_api_key: str = field(default="", repr=False)
+    jev_model: str = "jev-latest"
+    moderation_threshold: float = 0.55
+    moderation_review_low: float = 0.45
+    moderation_channel_topic: str = "Technology news and tutorials"
+    telegram_discussion_group_id: int | None = None
+    bale_discussion_group_id: int | None = None
+    moderation_skip_admins: bool = True
+    moderation_alert_chat_id: int | None = None
 
 
 def load_config(env_path: Path) -> Config:
@@ -52,13 +63,29 @@ def load_config(env_path: Path) -> Config:
         return result
 
     def number(key: str, default: str) -> float:
-        import math
         try:
             result = float(value(key, default))
         except ValueError:
             raise ConfigError(f"{key} must be a positive number.") from None
         if not math.isfinite(result) or result <= 0:
             raise ConfigError(f"{key} must be a positive finite number.")
+        return result
+
+    def probability(key: str, default: str) -> float:
+        try:
+            result = float(value(key, default))
+        except ValueError:
+            raise ConfigError(f"{key} must be a probability between 0 and 1.") from None
+        if not math.isfinite(result) or not 0 <= result <= 1:
+            raise ConfigError(f"{key} must be a finite probability between 0 and 1.")
+        return result
+
+    def optional_id(key: str) -> int | None:
+        if not value(key):
+            return None
+        result = integer(key, minimum=None)
+        if result == 0:
+            raise ConfigError(f"{key} cannot be zero.")
         return result
 
     def boolean(key: str, default: str) -> bool:
@@ -97,6 +124,13 @@ def load_config(env_path: Path) -> Config:
     if poll > 50:
         raise ConfigError("POLL_TIMEOUT_SECONDS must be at most 50.")
     base = env_path.resolve().parent
+    threshold = probability("MODERATION_THRESHOLD", "0.55")
+    review_low = probability("MODERATION_REVIEW_LOW", "0.45")
+    if review_low > threshold:
+        raise ConfigError("MODERATION_REVIEW_LOW cannot exceed MODERATION_THRESHOLD.")
+    discussion_id = optional_id("TELEGRAM_DISCUSSION_GROUP_ID")
+    if discussion_id is not None and (discussion_id >= 0 or discussion_id == telegram_id):
+        raise ConfigError("TELEGRAM_DISCUSSION_GROUP_ID must be a negative group ID distinct from the channel.")
     return Config(
         telegram_token=tokens["TELEGRAM_BOT_TOKEN"], bale_token=tokens["BALE_BOT_TOKEN"],
         telegram_channel_id=telegram_id, bale_channel_id=bale_id,
@@ -113,4 +147,12 @@ def load_config(env_path: Path) -> Config:
         circuit_window=integer("CIRCUIT_WINDOW_SECONDS", "60"),
         circuit_max_sends=integer("CIRCUIT_MAX_SENDS", "20"),
         album_wait=number("ALBUM_WAIT_SECONDS", "3"),
+        moderation_enabled=boolean("MODERATION_ENABLED", "true"),
+        typesafe_api_key=value("TYPESAFE_API_KEY"), jev_model=value("JEV_MODEL", "jev-latest"),
+        moderation_threshold=threshold, moderation_review_low=review_low,
+        moderation_channel_topic=value("MODERATION_CHANNEL_TOPIC", "Technology news and tutorials"),
+        telegram_discussion_group_id=discussion_id,
+        bale_discussion_group_id=optional_id("BALE_DISCUSSION_GROUP_ID"),
+        moderation_skip_admins=boolean("MODERATION_SKIP_ADMINS", "true"),
+        moderation_alert_chat_id=optional_id("MODERATION_ALERT_CHAT_ID"),
     )

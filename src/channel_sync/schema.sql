@@ -116,3 +116,14 @@ CREATE TABLE IF NOT EXISTS forward_events (
     direction TEXT NOT NULL, occurred_at REAL NOT NULL, item_count INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS forward_rate ON forward_events(direction,occurred_at);
+
+-- Additive moderation audit; existing inboxes, offsets, and sends stay intact.
+CREATE TABLE IF NOT EXISTS moderation_decisions (
+    platform TEXT NOT NULL CHECK(platform IN ('telegram','bale')),
+    chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, user_id INTEGER,
+    text TEXT NOT NULL, scores_json TEXT NOT NULL DEFAULT '{}',
+    action TEXT NOT NULL, reason TEXT, alert_status TEXT,
+    created_at REAL NOT NULL, updated_at REAL NOT NULL,
+    PRIMARY KEY(platform,chat_id,message_id)
+);
+CREATE INDEX IF NOT EXISTS moderation_time ON moderation_decisions(created_at);

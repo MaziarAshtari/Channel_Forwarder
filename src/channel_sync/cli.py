@@ -12,6 +12,7 @@ from .clients import BaleClient, TelegramClient
 from .config import ConfigError, load_config
 from .health import health
 from .inspection import inspect_echo, utc_now
+from .jev import JevClient
 from .redaction import Redactor, configure_logging
 from .reports import save_report
 from .store import Store
@@ -41,7 +42,7 @@ def parser():
     sub.add_parser("check-config", help="Validate .env locally; no network calls")
     init = sub.add_parser("init-db", help="Create SQLite schema locally; no tokens required")
     init.add_argument("--database", type=Path, default=Path("data/channel-sync.sqlite3"))
-    health_parser = sub.add_parser("health", help="Read-only getMe, getChat, getChatMember for both bots")
+    health_parser = sub.add_parser("health", help="Check both bots, discussion delete rights, and a harmless jev evaluation")
     health_parser.add_argument("--output", type=Path, help="Also save the redacted health report")
     inspect_parser = sub.add_parser("inspect-echo", help="Poll first, send test probes, observe for 60 seconds")
     inspect_parser.add_argument("--output", type=Path, help="Report filename (default: reports/inspect-echo-TIMESTAMP.json)")
@@ -50,17 +51,26 @@ def parser():
     runner.add_argument("--new-posts-only", action="store_true", help="Save and ignore the initial pending update backlog")
     runner.add_argument("--stop-on-error", action="store_true", help="Stop the live experiment on the first forwarding problem")
     runner.add_argument("--output", type=Path, help="Redacted run report filename")
-    runner.add_argument("--dry-run", action="store_true", help="Override .env to poll and plan without sending or downloading")
+    runner.add_argument("--dry-run", action="store_true", help="Poll, plan, and classify without sending, deleting, or downloading")
     runner.add_argument("--watch-duplicates", action="store_true", help="Supervised test: stop on a new message ID reusing exhausted bridge signatures")
     runner.add_argument("--session-control", type=Path, help="Private JSON control file that arms the final observation timer")
     batch = sub.add_parser("live-batch", help="Publish authorized bot fixtures for phases B and C; no manual confirmations")
     batch.add_argument("--output", type=Path, help="Redacted batch report filename")
     batch.add_argument("--video", type=Path, default=Path("data/batch-fixtures/clip.mp4"), help="64×64 MP4 test fixture")
     sub.add_parser("status", help="Offline job, signature, and circuit status")
+    moderate_test = sub.add_parser("moderate-test", help="Print all jev scores for text; never delete or send messages")
+    moderate_test.add_argument("text", help="Comment text to classify")
     return result
 
 
 async def run_live(args, config, redactor) -> int:
+    if args.command == "moderate-test":
+        evaluator = JevClient(config)
+        try:
+            print(json.dumps(await evaluator.classify(args.text), indent=2, ensure_ascii=False))
+            return 0
+        finally:
+            await evaluator.aclose()
     clients = {}
     try:
         clients["telegram"] = TelegramClient(config.telegram_token, config)
@@ -127,7 +137,8 @@ def main(argv=None) -> int:
             print(f"SQLite schema ready: {args.database.resolve()}")
             return 0
         config = load_config(args.env)
-        redactor = Redactor(config.telegram_token, config.bale_token, config.telegram_proxy_url)
+        redactor = Redactor(config.telegram_token, config.bale_token, config.telegram_proxy_url,
+                            config.typesafe_api_key)
         configure_logging(config.log_level, redactor)
         if args.command == "status":
             with process_lock(config.database_path):
@@ -149,7 +160,10 @@ def main(argv=None) -> int:
                               "telegram_proxy_enabled": bool(config.telegram_proxy_url),
                               "bale_connects_directly": True, "dry_run": config.dry_run,
                               "telegram_to_bale_enabled": config.telegram_to_bale_enabled,
-                              "bale_to_telegram_enabled": config.bale_to_telegram_enabled}, indent=2))
+                              "bale_to_telegram_enabled": config.bale_to_telegram_enabled,
+                              "moderation_enabled": config.moderation_enabled,
+                              "typesafe_api_key_configured": bool(config.typesafe_api_key),
+                              "moderation_threshold": config.moderation_threshold}, indent=2))
             return 0
         return asyncio.run(run_live(args, config, redactor))
     except ConfigError as exc:

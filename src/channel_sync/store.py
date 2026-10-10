@@ -159,3 +159,37 @@ class Store:
             "AND m.status IN ('sending','sent','uncertain') LIMIT 1",
             (platform, chat_id, signature, now),
         ).fetchone() is not None
+
+    def claim_moderation(self, platform, chat_id, message_id, user_id, text) -> bool:
+        now = time.time()
+        return self.connection.execute(
+            "INSERT OR IGNORE INTO moderation_decisions "
+            "(platform,chat_id,message_id,user_id,text,action,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,'classifying',?,?)",
+            (platform, chat_id, message_id, user_id, self.redactor.text(text), now, now),
+        ).rowcount == 1
+
+    def finish_moderation(self, platform, chat_id, message_id, *, action, scores=None, reason=None):
+        self.connection.execute(
+            "UPDATE moderation_decisions SET action=?,scores_json=?,reason=?,updated_at=? "
+            "WHERE platform=? AND chat_id=? AND message_id=?",
+            (action, self.dumps(scores or {}), self.redactor.text(reason) if reason else None,
+             time.time(), platform, chat_id, message_id),
+        )
+
+    def moderation_alert(self, platform, chat_id, message_id, status):
+        self.connection.execute(
+            "UPDATE moderation_decisions SET alert_status=?,updated_at=? "
+            "WHERE platform=? AND chat_id=? AND message_id=?",
+            (status, time.time(), platform, chat_id, message_id),
+        )
+
+    def recover_moderation(self):
+        # A restart never reclassifies a claimed comment or repeats an ambiguous write.
+        self.connection.execute(
+            "UPDATE moderation_decisions SET action=CASE action WHEN 'deleting' "
+            "THEN 'delete_uncertain' ELSE 'kept_interrupted' END, "
+            "reason='Interrupted during moderation; refusing replay',updated_at=? "
+            "WHERE action IN ('classifying','deleting')", (time.time(),),
+        )
+        self.connection.execute("UPDATE moderation_decisions SET alert_status='uncertain' WHERE alert_status='sending'")

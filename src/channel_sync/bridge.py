@@ -11,6 +11,7 @@ from .formatting import RichText, bale_to_telegram, convert, escape_bale
 from .health import health
 from .media import FileTooLarge, download_attachment, media_kind, stable_properties
 from .messages import extract_message, own_author
+from .moderation import Moderator
 from .redaction import Redactor
 from .reports import save_report
 from .signatures import PayloadCodec, echo_signature
@@ -39,7 +40,9 @@ class Bridge:
         self.enabled = {"telegram": config.telegram_to_bale_enabled, "bale": config.bale_to_telegram_enabled}
         self.bot_ids = {}
         self.codec = PayloadCodec(config)
-        self.redactor = Redactor(config.telegram_token, config.bale_token, config.telegram_proxy_url)
+        self.redactor = Redactor(config.telegram_token, config.bale_token, config.telegram_proxy_url,
+                                 config.typesafe_api_key)
+        self.moderator = Moderator(config, clients.get("telegram"), store)
         self.stop_on_error, self.new_posts_only, self.output = stop_on_error, new_posts_only, output
         self.ready = {platform: asyncio.Event() for platform in clients}
         self.wakeup, self.stop = asyncio.Event(), asyncio.Event()
@@ -110,6 +113,18 @@ class Bridge:
                 self.problem("tg_to_bale" if platform == "telegram" else "bale_to_tg", "Late album item requires reconciliation")
         self.wakeup.set()
 
+    async def moderate_inbox(self, platform):
+        if not self.config.moderation_enabled or platform != "telegram":
+            return
+        for row in self.store.pending_updates(platform):
+            update = self.codec.decode(json.loads(row["payload_json"]))
+            # Moderation also covers discussion comments in a new-posts-only batch;
+            # that option skips historical forwarding, not moderation.
+            result = await self.moderator.handle(platform, update)
+            if result is not None:
+                self.store.mark_moderated(platform, row["update_id"])
+                self.event("moderation", platform=platform, update_id=row["update_id"], **result)
+
     async def supervise(self):
         while not self.stop.is_set():
             if self.session_control and self.session_control.exists():
@@ -129,6 +144,7 @@ class Bridge:
         first = True
         # New-posts-only is an explicit live-test option; normal run replays queued work.
         baseline = self.new_posts_only
+        await self.moderate_inbox(platform)
         self.process_inbox(platform, baseline=False)
         while not self.stop.is_set():
             envelope = await client.get_updates(self.store.offset(platform, SCOPE), timeout=0 if first or baseline else None)
@@ -138,6 +154,7 @@ class Bridge:
             self.report["updates"].extend({"platform": platform, "at": time.time(), "update": update} for update in updates)
             self.checkpoint()
             self.store.ingest(platform, SCOPE, updates, encoder=self.codec.encode)
+            await self.moderate_inbox(platform)
             self.process_inbox(platform, baseline=baseline)
             if not baseline or not updates:
                 baseline = False
@@ -306,12 +323,17 @@ class Bridge:
         tasks = []
         try:
             self.checkpoint()
-            report = await health(self.clients, self.channel_ids)
+            # A jev outage must not prevent polling/forwarding or violate fail-open.
+            report = await health(self.clients, self.channel_ids, check_moderation=False)
             self.report["health"] = report
             self.checkpoint()
             if not report["ok"]:
                 raise RuntimeError("Health check failed; see the run report")
             self.bot_ids = {item["platform"]: item["getMe"]["result"]["id"] for item in report["bots"]}
+            telegram_health = next(item for item in report["bots"] if item["platform"] == "telegram")
+            self.report["moderation"] = await self.moderator.prepare(telegram_health)
+            self.store.recover_moderation()
+            self.checkpoint()
             for platform, client in self.clients.items():
                 webhook = await client.call("getWebhookInfo")
                 if webhook["result"].get("url"):
@@ -339,6 +361,7 @@ class Bridge:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            await self.moderator.aclose()
             self.report["finished_at"] = datetime.now(timezone.utc).isoformat()
             self.report["database"] = self.store.snapshot()
             self.checkpoint()

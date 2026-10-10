@@ -13,7 +13,7 @@ platforms in one asyncio process. Configure `TG_TO_BALE` and `BALE_TO_TG` as
 absent. Short names take precedence. Both platforms are always polled, including
 disabled directions, so their expected echoes are consumed.
 
-Telegram alone uses `TELEGRAM_PROXY_URL` when configured. Bale connects directly.
+Telegram and TypeSafe jev use `TELEGRAM_PROXY_URL` when configured. Bale connects directly.
 API and download clients use `trust_env=False`. Secrets are read only from `.env`.
 Run reports, SQLite, and `.env` are gitignored; report JSON and logs redact tokens.
 Bale file handles can embed bot tokens. Persisted operational handles replace
@@ -24,6 +24,15 @@ the current `.env` only when needed for downloads.
 records translated plans without downloading or sending. Those posts are marked
 `dry_run` and will not be replayed when dry run is switched off. Disabled
 directions similarly ignore their new source posts.
+
+With `MODERATION_ENABLED=true`, the Telegram poller also receives `message`
+updates and moderates real-user text/caption comments in the linked discussion
+group before channel routing. Discussion comments never enter forwarding jobs.
+Dry run still classifies and logs them, but suppresses deletions and review
+alerts. Moderation decisions and deduplication have their own SQLite table and
+do not consume forwarding circuit quotas. See
+[README.md](README.md#comment-moderation) for setup, health checks, `moderate-test`,
+and the documented Bale comment limitation.
 
 Text and captions translate bold, italic, and links in both directions. Telegram
 offsets and lengths use UTF-16, including emoji. Literal Markdown delimiters are

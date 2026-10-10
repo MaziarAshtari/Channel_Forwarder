@@ -16,4 +16,4 @@ channel-sync = "channel_sync.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-channel_sync = ["schema.sql", "assets/*.png"]
+channel_sync = ["schema.sql", "moderation_questions.json", "assets/*.png"]
