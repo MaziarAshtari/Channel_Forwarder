@@ -1,0 +1,91 @@
+{
+  "source_capture": "inspect-echo-2026-10-07T05-57-33.290764+00-00.json",
+  "updates": [
+    {
+      "update_id": 30,
+      "message": {
+        "message_id": 53,
+        "from": {
+          "id": 0,
+          "is_bot": false,
+          "first_name": "",
+          "last_name": ""
+        },
+        "sender_chat": {
+          "id": 5716375015,
+          "type": "channel",
+          "title": "AGP_Test_two",
+          "username": "agp_test_two"
+        },
+        "date": 1791352671,
+        "chat": {
+          "id": 5716375015,
+          "type": "channel",
+          "title": "AGP_Test_two",
+          "username": "agp_test_two"
+        },
+        "media_group_id": "4693129509266924085",
+        "document": {
+          "file_id": "[REDACTED]:[REDACTED]",
+          "file_unique_id": "",
+          "file_name": "probe-1.png",
+          "mime_type": "image/png",
+          "file_size": 427
+        },
+        "photo": [
+          {
+            "file_id": "[REDACTED]:[REDACTED]",
+            "file_unique_id": "",
+            "width": 128,
+            "height": 128,
+            "file_size": 427
+          }
+        ],
+        "caption": "channel-sync ec1d9b787fd9 bale album/2"
+      }
+    },
+    {
+      "update_id": 31,
+      "message": {
+        "message_id": 52,
+        "from": {
+          "id": 0,
+          "is_bot": false,
+          "first_name": "",
+          "last_name": ""
+        },
+        "sender_chat": {
+          "id": 5716375015,
+          "type": "channel",
+          "title": "AGP_Test_two",
+          "username": "agp_test_two"
+        },
+        "date": 1791352671,
+        "chat": {
+          "id": 5716375015,
+          "type": "channel",
+          "title": "AGP_Test_two",
+          "username": "agp_test_two"
+        },
+        "media_group_id": "4693129509266924085",
+        "document": {
+          "file_id": "[REDACTED]:[REDACTED]",
+          "file_unique_id": "",
+          "file_name": "probe-0.png",
+          "mime_type": "image/png",
+          "file_size": 427
+        },
+        "photo": [
+          {
+            "file_id": "[REDACTED]:[REDACTED]",
+            "file_unique_id": "",
+            "width": 128,
+            "height": 128,
+            "file_size": 427
+          }
+        ],
+        "caption": "channel-sync ec1d9b787fd9 bale album/1"
+      }
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "channel-sync"
+version = "0.1.0"
+description = "Telegram/Bale channel bridge diagnostics and durable foundations"
+requires-python = ">=3.11"
+dependencies = ["httpx[socks]==0.28.1", "python-dotenv==1.2.4"]
+
+[project.scripts]
+channel-sync = "channel_sync.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+channel_sync = ["schema.sql", "assets/*.png"]
