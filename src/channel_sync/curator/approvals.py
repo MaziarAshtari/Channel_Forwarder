@@ -1,11 +1,12 @@
-import json
 import asyncio
 import logging
+import re
 import time
 
 from ..clients import ApiError, client_write_lock
 from ..formatting import escape_bale
 from ..messages import utf16_length
+from ..persian import challenge_description, persian_lines, platform_name, state_name
 from .publisher import publication_parts
 
 log = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ class Approvals:
 
     async def message(self, platform, chat, text, markup=None):
         await self.ensure_private(platform, chat)
+        text = persian_lines(text)
         params = {
             "chat_id": chat,
             "text": escape_bale(text) if platform == "bale" else text,
@@ -96,96 +98,52 @@ class Approvals:
             *(send(p, chat) for p in self.clients for chat in self.admins(p))
         )
 
-    async def source_notice(self, topic):
-        for platform in self.clients:
-            for chat in self.admins(platform):
-                try:
-                    response = await self.message(
-                        platform,
-                        chat,
-                        f"New information attached to topic #{topic['id']}: {topic['summary']}\n"
-                        + (
-                            "Already published; regeneration updates the admin preview only."
-                            if topic["state"] == "published"
-                            else ""
-                        ),
-                        {
-                            "inline_keyboard": [
-                                [
-                                    {
-                                        "text": "🔄 Regenerate with new sources",
-                                        "callback_data": f"c:{topic['id']}:{topic['revision']}:regen",
-                                    }
-                                ]
-                            ]
-                        },
-                    )
-                    self.store.connection.execute(
-                        "INSERT OR REPLACE INTO curator_replies VALUES(?,?,?,?,?,?)",
-                        (
-                            platform,
-                            chat,
-                            response["result"]["message_id"],
-                            topic["id"],
-                            topic["revision"],
-                            "source_offer",
-                        ),
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "Curator new-source alert failed platform=%s error=%s",
-                        platform,
-                        type(exc).__name__,
-                    )
+    @staticmethod
+    def button(topic, label, action):
+        return {
+            "text": label,
+            "callback_data": f"c:{topic['id']}:{topic['revision']}:{action}",
+        }
 
     def buttons(self, topic):
-        ident, rev = topic["id"], topic["revision"]
-
-        def button(label, action):
-            return {"text": label, "callback_data": f"c:{ident}:{rev}:{action}"}
-
+        rows = []
         if topic["state"] == "pending":
             rows = [
-                [button("✅ Approve", "approve"), button("❌ Reject", "reject")],
-                [button("🔄 Regenerate", "regen"), button("✏️ Edit", "edit")],
                 [
-                    button(
-                        "🖼 Media: " + ("on" if topic["media_enabled"] else "off"),
-                        "media",
-                    )
+                    self.button(topic, "✅ تأیید", "approve"),
+                    self.button(topic, "❌ لغو", "reject"),
+                    self.button(topic, "✏️ ویرایش", "edit"),
                 ],
             ]
-        elif topic["state"] in {"rejected", "error"}:
-            rows = [[button("🔄 Regenerate", "regen")]]
-        else:
-            rows = []
-            if topic["state"] == "published":
-                rows.append([button("🔄 Regenerate preview", "regen")])
-            for row in self.store.connection.execute(
-                "SELECT platform FROM curator_publications WHERE topic_id=? AND state='failed'",
-                (ident,),
-            ):
-                rows.append([button("Retry publish: " + row[0], "retry_" + row[0])])
         return {"inline_keyboard": rows}
 
     def control_text(self, topic):
         deliveries = [
-            f"{r[0]}: {r[1]}" + (f" ({r[2][:240]})" if r[2] else "")
+            f"انتشار در {platform_name(r[0])}: {state_name(r[1])}"
             for r in self.store.connection.execute(
-                "SELECT platform,state,error FROM curator_publications WHERE topic_id=?",
+                "SELECT platform,state FROM curator_publications WHERE topic_id=?",
                 (topic["id"],),
             )
         ]
-        header = (
-            f"Draft #{topic['id']} · {topic['state']} · revision {topic['revision']}\n"
-        )
+        header = f"پیش‌نویس شمارهٔ {topic['id']} · {state_name(topic['state'])} · نسخهٔ {topic['revision']}\n"
         if topic.get("actor"):
-            header += topic["actor"] + "\n"
+            actor = topic["actor"]
+            legacy = re.fullmatch(
+                r"(Approved|Rejected) by (\d+) in (Telegram|Bale)", actor
+            )
+            if legacy:
+                verb = "تأیید" if legacy[1] == "Approved" else "لغو"
+                actor = f"{verb} توسط کاربر {legacy[2]} در {platform_name(legacy[3].lower())}"
+            if not re.search(r"[\u0600-\u06ff]", actor):
+                actor = "اقدام آخر توسط مدیر انجام شد."
+            header += actor + "\n"
         if deliveries:
-            header += " | ".join(deliveries) + "\n"
-        header += "Media: " + ("on" if topic["media_enabled"] else "off") + "\n\n"
+            header += "\n".join(deliveries) + "\n"
+        if topic["state"] == "partial":
+            header += "بازیابی انتشار ناموفق از فرمان /curator در دسترس است.\n"
+        header += "رسانهٔ پست اصلی در صورت وجود به‌طور خودکار همراه متن ارسال می‌شود.\n\n"
         # Keep full draft in its preview messages; control text fits both APIs.
-        return header + topic["summary"][:1300]
+        return header + "موضوع: " + topic["entity"][:300]
 
     async def sync_topic(self, topic_id, *, force=False):
         async with self.preview_locks.setdefault(topic_id, asyncio.Lock()):
@@ -199,7 +157,7 @@ class Approvals:
 
     async def _sync_topic(self, topic_id, *, force=False):
         topic = self.store.topic(topic_id)
-        if not topic or topic["state"] == "researching":
+        if not topic or topic["state"] == "merged":
             return
         for platform in self.clients:
             for chat in self.admins(platform):
@@ -210,6 +168,33 @@ class Approvals:
                 try:
                     await self.ensure_private(platform, chat)
                     text, markup = self.control_text(topic), self.buttons(topic)
+                    if topic["state"] == "researching":
+                        # Rewriting invalidates both old controls immediately, but
+                        # must not resend the previous draft as a new preview.
+                        if row:
+                            await self.call(
+                                platform,
+                                "editMessageText",
+                                {
+                                    "chat_id": chat,
+                                    "message_id": row["message_id"],
+                                    "text": escape_bale(text)
+                                    if platform == "bale"
+                                    else text,
+                                    "reply_markup": markup,
+                                },
+                            )
+                            self.store.connection.execute(
+                                "UPDATE curator_previews SET revision=?,dirty=? WHERE topic_id=? AND platform=? AND chat_id=?",
+                                (
+                                    topic["revision"],
+                                    self.preview_changed(topic_id, text, markup),
+                                    topic_id,
+                                    platform,
+                                    chat,
+                                ),
+                            )
+                        continue
                     if row and not row["dirty"] and not force:
                         continue
                     if row and row["revision"] == topic["revision"]:
@@ -243,30 +228,32 @@ class Approvals:
                             {
                                 "chat_id": chat,
                                 "message_id": row["message_id"],
-                                "text": f"Draft #{topic_id}: superseded by revision {topic['revision']}",
+                                "text": f"پیش‌نویس شمارهٔ {topic_id} با نسخهٔ {topic['revision']} جایگزین شد.",
                                 "reply_markup": {"inline_keyboard": []},
                             },
                         )
                     if topic["text"]:
                         try:
-                            media = (
-                                await self.publisher.media(
-                                    self.store.draft_sources(topic_id)
-                                )
-                                if topic["media_enabled"]
-                                else []
+                            media = await self.publisher.media(
+                                self.store.draft_sources(topic_id)
                             )
                         except Exception as exc:
                             media = []
+                            log.warning(
+                                "Curator media preview failed topic=%s platform=%s error=%s",
+                                topic_id,
+                                platform,
+                                type(exc).__name__,
+                            )
                             await self.message(
                                 platform,
                                 chat,
-                                "Media preview unavailable: "
-                                + type(exc).__name__
-                                + ". The stored source media remains selected; use Toggle media to publish text only.",
+                                "نمایش رسانه در پیش‌نمایش ممکن نشد؛ هنگام انتشار، دریافت رسانهٔ اصلی دوباره امتحان می‌شود.",
                             )
                         for index, items in enumerate(
-                            publication_parts(topic["text"], media, platform)
+                            publication_parts(
+                                persian_lines(topic["text"], post=True), media, platform
+                            )
                         ):
                             await self.publisher.send_part(
                                 f"curator:preview:{topic_id}:{topic['revision']}:{platform}:{chat}:{index}",
@@ -303,33 +290,135 @@ class Approvals:
         elif command == "resume":
             self.store.resume_reader()
         pending = [
-            f"#{r[0]}: {r[1][:130]}"
+            f"پیش‌نویس شمارهٔ {r[0]}: موضوع {r[1][:100]}"
             for r in self.store.connection.execute(
-                "SELECT id,summary FROM curator_topics WHERE state='pending' ORDER BY id LIMIT 20"
+                "SELECT id,entity FROM curator_topics WHERE state='pending' ORDER BY id LIMIT 20"
             )
         ]
         data = self.store.stats(self.config)
-        text = (
-            "Curator\n"
-            + json.dumps(data, ensure_ascii=False, indent=2)
-            + "\nPending drafts:\n"
-            + "\n".join(pending)
+        reader = data["reader"]
+        lines = [
+            "وضعیت خبرگزین",
+            "خواندن تایم‌لاین: " + ("متوقف" if reader["paused"] else "فعال"),
+            "ورود به حساب: " + ("تأییدشده" if reader["logged_in"] else "نیازمند بررسی"),
+            f"تاریخ آمار: {data['day']}",
+            f"پست‌های دریافت‌شدهٔ امروز: {sum(data['today'].values())}",
+            f"تکراری‌های امروز: {data['today'].get('duplicate', 0)}",
+        ]
+        if reader["challenge"]:
+            lines.append("دلیل توقف: " + challenge_description(reader["reason"]))
+        if reader["last_error"]:
+            lines.append(
+                "مرورگر با خطا روبه‌رو شده است؛ جزئیات در گزارش سرویس ثبت شده است."
+            )
+        for label, key in (
+            ("پست", "today"),
+            ("موضوع", "topics"),
+            ("انتشار", "publications"),
+        ):
+            lines.extend(
+                f"آمار {label}، {state_name(state)}: {count}"
+                for state, count in data[key].items()
+            )
+        lines += [
+            "پیش‌نویس‌های در انتظار تأیید:",
+            *(pending or ["پیش‌نویسی در انتظار تأیید نیست."]),
+        ]
+        lines.append(
+            "راهنما: فرمان‌های /curator pause و /curator resume و /curator pending در دسترس‌اند."
         )
         markup = {
             "inline_keyboard": [
                 [
-                    {"text": "Pause", "callback_data": "c:pause"},
-                    {"text": "Resume", "callback_data": "c:resume"},
-                    {"text": "Pending", "callback_data": "c:pending"},
+                    {"text": "توقف", "callback_data": "c:pause"},
+                    {"text": "ادامه", "callback_data": "c:resume"},
+                    {"text": "پیش‌نویس‌ها", "callback_data": "c:pending"},
                 ]
             ]
         }
-        await self.message(platform, chat, text[:3600], markup)
+        # Recovery controls belong to status, not to the three-button draft UI.
+        for row in self.store.connection.execute(
+            "SELECT t.id,t.revision,p.platform FROM curator_publications p "
+            "JOIN curator_topics t ON t.id=p.topic_id WHERE p.state='failed' ORDER BY t.id LIMIT 20"
+        ):
+            markup["inline_keyboard"].append(
+                [
+                    self.button(
+                        row,
+                        f"تلاش دوباره برای انتشار شمارهٔ {row['id']} در {platform_name(row['platform'])}",
+                        "retry_" + row["platform"],
+                    )
+                ]
+            )
+        await self.message(platform, chat, "\n".join(lines)[:3600], markup)
         if command == "pending":
             for row in self.store.connection.execute(
                 "SELECT id FROM curator_topics WHERE state='pending' ORDER BY id LIMIT 20"
             ):
                 await self.sync_topic(row[0], force=True)
+
+    async def edit_menu(self, platform, chat, topic):
+        markup = {
+            "inline_keyboard": [
+                [self.button(topic, "✍️ ارسال متن جدید", "replace")],
+                [self.button(topic, "🤖 دستور بازنویسی", "rewrite")],
+                [self.button(topic, "↩️ بازگشت", "back")],
+            ]
+        }
+        response = await self.message(
+            platform,
+            chat,
+            f"ویرایش پیش‌نویس شمارهٔ {topic['id']}؛ روش ویرایش را انتخاب کنید.",
+            markup,
+        )
+        with self.store.transaction() as db:
+            db.execute(
+                "DELETE FROM curator_replies WHERE platform=? AND chat_id=?",
+                (platform, chat),
+            )
+            db.execute(
+                "INSERT INTO curator_replies VALUES(?,?,?,?,?,?)",
+                (
+                    platform,
+                    chat,
+                    response["result"]["message_id"],
+                    topic["id"],
+                    topic["revision"],
+                    "menu",
+                ),
+            )
+
+    async def menu_action(self, platform, chat, message_id, topic, action):
+        if action == "back":
+            text = "بازگشت به پیش‌نمایش انجام شد؛ برای تغییر متن دوباره ویرایش را بزنید."
+            markup = {"inline_keyboard": []}
+        else:
+            text = (
+                "متن کامل جدید را در پیام بعدی بفرستید؛ این متن جایگزین پیش‌نویس می‌شود."
+                if action == "replace"
+                else "دستور بازنویسی را در پیام بعدی بفرستید؛ نسخهٔ تازه برای تأیید به هر دو ربات ارسال می‌شود."
+            )
+            markup = {"inline_keyboard": [[self.button(topic, "↩️ بازگشت", "back")]]}
+        await self.call(
+            platform,
+            "editMessageText",
+            {
+                "chat_id": chat,
+                "message_id": message_id,
+                "text": escape_bale(text) if platform == "bale" else text,
+                "reply_markup": markup,
+            },
+        )
+        if action == "back":
+            self.store.connection.execute(
+                "DELETE FROM curator_replies WHERE platform=? AND chat_id=? AND message_id=?",
+                (platform, chat, message_id),
+            )
+        else:
+            self.store.connection.execute(
+                "UPDATE curator_replies SET mode=? WHERE platform=? AND chat_id=? AND message_id=?",
+                (action, platform, chat, message_id),
+            )
 
     async def handle(self, platform, update):
         if not self.authorized(platform, update):
@@ -362,60 +451,55 @@ class Approvals:
                 "SELECT message_id FROM curator_previews WHERE topic_id=? AND platform=? AND chat_id=?",
                 (ident, platform, chat),
             ).fetchone()
-            offer = self.store.connection.execute(
-                "SELECT 1 FROM curator_replies WHERE platform=? AND chat_id=? AND message_id=? "
-                "AND topic_id=? AND revision=? AND mode='source_offer'",
+            menu = self.store.connection.execute(
+                "SELECT mode FROM curator_replies WHERE platform=? AND chat_id=? AND message_id=? "
+                "AND topic_id=? AND revision=? AND mode IN ('menu','replace','rewrite')",
                 (platform, chat, message.get("message_id"), ident, revision),
             ).fetchone()
-            if (not preview or preview[0] != message.get("message_id")) and not (
-                offer and action == "regen"
-            ):
+            retry = action in {"retry_telegram", "retry_bale"}
+            if action in {"replace", "rewrite", "back"}:
+                valid = bool(menu)
+            else:
+                valid = (
+                    bool(preview and preview[0] == message.get("message_id")) or retry
+                )
+            if not valid:
                 return
             topic = self.store.topic(ident)
             if not topic or topic["revision"] != revision:
                 await self.message(
-                    platform, chat, "This preview is stale. Open /curator pending."
+                    platform,
+                    chat,
+                    "نسخهٔ این پیش‌نمایش قدیمی است؛ با فرمان /curator pending نسخهٔ تازه را باز کنید.",
                 )
                 return
-            verb = {
-                "approve": "Approved",
-                "reject": "Rejected",
-                "media": "Media changed",
-            }.get(action, action.capitalize())
-            actor = f"{verb} by {query['from']['id']} in {platform.title()}"
-            if action in {"approve", "reject", "media"}:
-                self.store.decide(ident, revision, action, actor)
-            elif action.startswith("retry_") and action[6:] in {"telegram", "bale"}:
+            if action in {"approve", "reject"}:
+                verb = "تأیید" if action == "approve" else "لغو"
+                actor = f"{verb} توسط کاربر {query['from']['id']} در {platform_name(platform)}"
+                if self.store.decide(ident, revision, action, actor):
+                    self.store.connection.execute(
+                        "DELETE FROM curator_replies WHERE topic_id=?", (ident,)
+                    )
+                    await self.sync_topic(ident)
+            elif retry and topic["state"] == "partial":
                 target = action[6:]
                 self.store.connection.execute(
                     "UPDATE curator_publications SET state='queued' WHERE topic_id=? AND platform=? AND state='failed'",
                     (ident, target),
                 )
                 self.store.dirty(ident)
-            elif action in {"regen", "edit"} and topic["state"] in {
-                "pending",
-                "rejected",
-                "error",
-                "published",
-            }:
-                if topic["state"] == "published" and action == "edit":
-                    return
-                prompt = (
-                    "Reply to this message with corrected text."
-                    if action == "edit"
-                    else "Reply with regeneration instructions, or /skip for no instruction."
+                await self.message(
+                    platform,
+                    chat,
+                    f"انتشار ناموفق در {platform_name(target)} دوباره در صف قرار گرفت.",
                 )
-                response = await self.message(platform, chat, prompt)
-                self.store.connection.execute(
-                    "INSERT OR REPLACE INTO curator_replies VALUES(?,?,?,?,?,?)",
-                    (
-                        platform,
-                        chat,
-                        response["result"]["message_id"],
-                        ident,
-                        revision,
-                        action,
-                    ),
+            elif action == "edit" and topic["state"] == "pending":
+                await self.edit_menu(platform, chat, topic)
+            elif (
+                action in {"replace", "rewrite", "back"} and topic["state"] == "pending"
+            ):
+                await self.menu_action(
+                    platform, chat, message["message_id"], topic, action
                 )
             return
         text = message.get("text", "").strip()
@@ -424,58 +508,71 @@ class Approvals:
             await self.status(platform, chat, command)
             return
         reply_id = message.get("reply_to_message", {}).get("message_id")
-        reply = self.store.connection.execute(
-            "SELECT * FROM curator_replies WHERE platform=? AND chat_id=? AND message_id=?",
-            (platform, chat, reply_id),
-        ).fetchone()
+        if reply_id is not None:
+            reply = self.store.connection.execute(
+                "SELECT * FROM curator_replies WHERE platform=? AND chat_id=? AND message_id=? AND mode IN ('replace','rewrite')",
+                (platform, chat, reply_id),
+            ).fetchone()
+        else:
+            # The next private text message is sufficient; a Telegram-style reply
+            # is optional, so the same interaction works in both bots.
+            reply = self.store.connection.execute(
+                "SELECT * FROM curator_replies WHERE platform=? AND chat_id=? AND mode IN ('replace','rewrite') ORDER BY message_id DESC LIMIT 1",
+                (platform, chat),
+            ).fetchone()
         if not reply or not text:
             return
         topic = self.store.topic(reply["topic_id"])
         if (
             not topic
             or topic["revision"] != reply["revision"]
-            or topic["state"] not in {"pending", "rejected", "error", "published"}
+            or topic["state"] != "pending"
         ):
             await self.message(
-                platform, chat, "This edit/regeneration request is stale."
+                platform,
+                chat,
+                "درخواست ویرایش قدیمی است؛ نسخهٔ تازهٔ پیش‌نویس را باز کنید.",
             )
             return
-        if reply["mode"] == "edit":
-            if utf16_length(text) > 3900:
-                await self.message(
-                    platform,
-                    chat,
-                    "Keep the corrected post within 3900 UTF-16 units, including signature.",
-                )
-                return
+        if reply["mode"] == "replace":
             if not text.endswith(self.config.channel_signature):
                 text += "\n\n" + self.config.channel_signature
+            text = persian_lines(text, post=True)
             if utf16_length(text) > 3900:
                 await self.message(
                     platform,
                     chat,
-                    "The corrected post plus signature exceeds 3900 UTF-16 units.",
+                    "متن جدید همراه امضا باید حداکثر ۳۹۰۰ واحد نوشتاری باشد؛ متن کوتاه‌تری بفرستید.",
                 )
                 return
-            self.store.connection.execute(
-                "UPDATE curator_topics SET text=?,state='pending',revision=revision+1,updated_at=? WHERE id=?",
-                (text, time.time(), topic["id"]),
-            )
-        else:
-            self.store.connection.execute(
-                "UPDATE curator_topics SET state='researching',revision=revision+1 WHERE id=?",
-                (topic["id"],),
-            )
-            self.store.enqueue(
-                "regenerate",
-                {
-                    "topic_id": topic["id"],
-                    "instruction": "" if text == "/skip" else text,
-                    "preview_only": topic["state"] == "published",
-                },
-            )
-        self.store.connection.execute(
-            "DELETE FROM curator_replies WHERE platform=? AND chat_id=? AND message_id=?",
-            (platform, chat, reply_id),
-        )
-        self.store.dirty(topic["id"])
+        # Atomic revision/state guards keep cross-bot edits and approval exclusive.
+        with self.store.transaction() as db:
+            if reply["mode"] == "replace":
+                changed = db.execute(
+                    "UPDATE curator_topics SET text=?,revision=revision+1,updated_at=? WHERE id=? AND revision=? AND state='pending'",
+                    (text, time.time(), topic["id"], reply["revision"]),
+                ).rowcount
+            else:
+                changed = db.execute(
+                    "UPDATE curator_topics SET state='researching',revision=revision+1,updated_at=? WHERE id=? AND revision=? AND state='pending'",
+                    (time.time(), topic["id"], reply["revision"]),
+                ).rowcount
+                if changed:
+                    self.store.enqueue(
+                        "rewrite", {"topic_id": topic["id"], "instruction": text}
+                    )
+            if changed:
+                db.execute(
+                    "DELETE FROM curator_replies WHERE topic_id=?", (topic["id"],)
+                )
+                self.store.dirty(topic["id"])
+        if changed:
+            if reply["mode"] == "rewrite":
+                await self.sync_topic(topic["id"])
+                await self.message(
+                    platform,
+                    chat,
+                    "بازنویسی آغاز شد؛ پیش‌نمایش تازه برای تأیید به هر دو ربات ارسال می‌شود.",
+                )
+            else:
+                await self.sync_topic(topic["id"])

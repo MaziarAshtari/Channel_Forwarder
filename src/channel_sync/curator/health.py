@@ -8,6 +8,7 @@ from .reader import run_browser
 from .store import CuratorStore
 from .topics import questions
 from ..config import ConfigError
+from ..persian import challenge_alert
 
 
 async def curator_health(config, clients):
@@ -117,7 +118,7 @@ async def curator_health(config, clients):
                 publisher = Publisher(config, clients, store)
                 try:
                     await Approvals(config, clients, store, publisher).alert(
-                        "X health check stopped the reader: " + event["reason"]
+                        challenge_alert(event["reason"])
                     )
                 finally:
                     await publisher.aclose()

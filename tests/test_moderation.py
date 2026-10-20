@@ -201,7 +201,7 @@ class ModerationTests(unittest.IsolatedAsyncioTestCase):
             await self.moderator.handle("telegram", self.update(index))
         self.assertEqual(len(self.api.alerts), 2)
         self.assertEqual([d["message_id"] for d in self.api.deletions], [4])
-        self.assertIn("Scores:", self.api.alerts[0]["text"])
+        self.assertIn("امتیازها:", self.api.alerts[0]["text"])
 
     async def test_duplicate_comment_is_not_classified_deleted_or_alerted_twice(self):
         update = self.update()
@@ -215,6 +215,16 @@ class ModerationTests(unittest.IsolatedAsyncioTestCase):
             other.close()
         self.assertEqual(len(self.api.jev_requests), 1)
         self.assertEqual(len(self.api.deletions), 1)
+
+    async def test_persian_review_labels_cover_multiline_comments_and_fit_message_limit(self):
+        self.moderator.config = replace(self.conf, moderation_alert_chat_id=1234)
+        await self.moderator.alert(GROUP_ID, 1, 999, "English comment\n" + "🧠\n" * 2000, self.api.scores)
+        text = self.api.alerts[-1]["text"]
+        self.assertLessEqual(len(text.encode("utf-16-le")) // 2, 3900)
+        for line in text.splitlines():
+            first = next((char for char in line if char.isalpha()), None)
+            if first:
+                self.assertTrue("\u0600" <= first <= "\u06ff", line)
 
     async def test_delete_failure_does_not_pause_forwarding_or_repeat_delete(self):
         self.api.delete_uncertain = True

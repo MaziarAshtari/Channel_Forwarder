@@ -136,10 +136,7 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
         self.jev = AsyncMock()
 
         async def evaluate(state, questions):
-            return {
-                q: (0 if q in {"is_same_topic", "has_important_new_info"} else 0.9)
-                for q in questions
-            }
+            return {q: (0 if q == "is_same_topic" else 0.9) for q in questions}
 
         self.jev.evaluate.side_effect = evaluate
         self.llm = AsyncMock()
@@ -180,6 +177,11 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
             "SELECT message_id FROM curator_previews WHERE topic_id=? AND platform=? AND chat_id=?",
             (topic["id"], platform, chat),
         ).fetchone()
+        if action in {"replace", "rewrite", "back"}:
+            preview = self.store.connection.execute(
+                "SELECT message_id FROM curator_replies WHERE topic_id=? AND platform=? AND chat_id=?",
+                (topic["id"], platform, chat),
+            ).fetchone()
         return {
             "update_id": update_id,
             "callback_query": {
@@ -201,6 +203,319 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
             and c[1] in {self.conf.telegram_channel_id, self.conf.bale_channel_id}
         ]
 
+    def private_text(self, platform, text):
+        chat = 111 if platform == "telegram" else 222
+        return {
+            "message": {
+                "message_id": 999,
+                "chat": {"id": chat, "type": "private"},
+                "from": {"id": chat},
+                "text": text,
+            }
+        }
+
+    def assert_persian_lines(self, text, *, post=False):
+        for line in text.splitlines():
+            if post and line.lstrip().startswith(("#", "🔗")):
+                continue
+            first = next((char for char in line if char.isalpha()), None)
+            if first:
+                self.assertTrue("\u0600" <= first <= "\u06ff", line)
+
+    async def test_duplicate_skip_is_silent_in_every_topic_state(self):
+        existing = self.pending()
+        await self.curator.approvals.sync_topic(existing["id"])
+        calls_before = {p: len(bot.calls) for p, bot in self.bots.items()}
+        states = (
+            "researching",
+            "pending",
+            "approved",
+            "published",
+            "rejected",
+            "error",
+            "partial",
+            "dry_run",
+        )
+        for index, state in enumerate(states, 200):
+            with self.subTest(state=state):
+                self.store.connection.execute(
+                    "UPDATE curator_topics SET state=? WHERE id=?",
+                    (state, existing["id"]),
+                )
+                candidate = post(str(index), "another_account")
+                self.store.add_post(candidate, self.conf)
+                with self.assertLogs(
+                    "channel_sync.curator.service", level="INFO"
+                ) as logs:
+                    await self.curator.process_post(candidate)
+                self.assertIn(
+                    f"duplicate skipped topic={existing['id']} post={index}",
+                    "\n".join(logs.output),
+                )
+                self.assertEqual(
+                    [p["id"] for p in self.store.sources(existing["id"])], ["101"]
+                )
+        self.assertEqual(self.store.stats(self.conf)["today"]["duplicate"], len(states))
+        self.assertEqual(
+            calls_before, {p: len(bot.calls) for p, bot in self.bots.items()}
+        )
+        self.assertFalse(
+            self.store.connection.execute(
+                "SELECT 1 FROM curator_tasks WHERE kind='alert'"
+            ).fetchone()
+        )
+        self.assertEqual(self.researcher.await_count, 0)
+        self.assertTrue(
+            all(
+                set(c.args[1]) == {"is_ai_tech_news", "is_useful", "should_curate"}
+                for c in self.jev.evaluate.call_args_list
+            )
+        )
+
+    async def test_semantic_duplicate_also_skips_silently(self):
+        existing = self.pending()
+        self.store.decide(existing["id"], existing["revision"], "reject", "مدیر")
+        self.llm.topic.return_value = topic("anthropic|opus-version-5.5|release")
+
+        async def scores(state, questions):
+            return {key: 0.95 for key in questions}
+
+        self.jev.evaluate.side_effect = scores
+        candidate = post("102", "another_account")
+        self.store.add_post(candidate, self.conf)
+        await self.curator.process_post(candidate)
+        self.assertEqual(len(self.store.sources(existing["id"])), 1)
+        self.assertEqual(self.store.stats(self.conf)["today"]["duplicate"], 1)
+        self.assertFalse(any(bot.calls for bot in self.bots.values()))
+        self.researcher.assert_not_awaited()
+
+    async def test_edit_menu_replaces_next_message_in_either_bot(self):
+        current = self.pending()
+        await self.curator.approvals.sync_topic(current["id"])
+        for platform in self.bots:
+            with self.subTest(platform=platform):
+                await self.curator.approvals.handle(
+                    platform, self.callback(platform, current, "edit")
+                )
+                menu = [
+                    c[1] for c in self.bots[platform].calls if c[0] == "sendMessage"
+                ][-1]
+                self.assertEqual(
+                    [
+                        b["text"]
+                        for row in menu["reply_markup"]["inline_keyboard"]
+                        for b in row
+                    ],
+                    ["✍️ ارسال متن جدید", "🤖 دستور بازنویسی", "↩️ بازگشت"],
+                )
+                await self.curator.approvals.handle(
+                    platform, self.callback(platform, current, "replace")
+                )
+                await self.curator.approvals.handle(
+                    platform, self.private_text(platform, "🧠 متن تازهٔ فارسی")
+                )
+                old = current
+                current = self.store.topic(current["id"])
+                self.assertIn("متن تازهٔ فارسی", current["text"])
+                self.assertGreater(current["revision"], old["revision"])
+                self.assertEqual(
+                    self.store.connection.execute(
+                        "SELECT COUNT(*) FROM curator_previews WHERE revision=?",
+                        (current["revision"],),
+                    ).fetchone()[0],
+                    2,
+                )
+                other = "bale" if platform == "telegram" else "telegram"
+                await self.curator.approvals.handle(
+                    other, self.callback(other, old, "approve")
+                )
+                self.assertEqual(self.store.topic(current["id"])["state"], "pending")
+                self.assertFalse(
+                    self.store.connection.execute(
+                        "SELECT 1 FROM curator_publications"
+                    ).fetchone()
+                )
+
+    async def test_rewrite_instruction_produces_new_preview_and_requires_approval(self):
+        pending = self.pending()
+        await self.curator.approvals.sync_topic(pending["id"])
+        await self.curator.approvals.handle(
+            "bale", self.callback("bale", pending, "edit")
+        )
+        await self.curator.approvals.handle(
+            "bale", self.callback("bale", pending, "rewrite")
+        )
+        instruction = "متن را کوتاه‌تر و ساده‌تر بنویس"
+        await self.curator.approvals.handle(
+            "bale", self.private_text("bale", instruction)
+        )
+        self.assertEqual(self.store.topic(pending["id"])["state"], "researching")
+        for platform in self.bots:
+            edits = [
+                c[1] for c in self.bots[platform].calls if c[0] == "editMessageText"
+            ]
+            self.assertIn("در حال پژوهش و نگارش", edits[-1]["text"])
+            self.assertEqual(edits[-1]["reply_markup"]["inline_keyboard"], [])
+        await self.curator.approvals.handle(
+            "bale", self.private_text("bale", instruction)
+        )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM curator_tasks WHERE kind='rewrite'"
+            ).fetchone()[0],
+            1,
+        )
+        self.researcher.return_value = {
+            **self.researcher.return_value,
+            "text": "خبر بازنویسی‌شده\nشناسه: " + self.conf.channel_signature,
+        }
+        await self.curator.pipeline_once()
+        await self.curator.outbox_once()
+        self.assertEqual(self.researcher.call_args.kwargs["instruction"], instruction)
+        current = self.store.topic(pending["id"])
+        self.assertEqual(current["state"], "pending")
+        self.assertIn("بازنویسی‌شده", current["text"])
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM curator_previews WHERE revision=?",
+                (current["revision"],),
+            ).fetchone()[0],
+            2,
+        )
+        self.assertFalse(self.channel_calls("telegram") or self.channel_calls("bale"))
+
+    async def test_edit_back_cancels_next_message_capture(self):
+        pending = self.pending()
+        await self.curator.approvals.sync_topic(pending["id"])
+        for platform in self.bots:
+            await self.curator.approvals.handle(
+                platform, self.callback(platform, pending, "edit")
+            )
+            await self.curator.approvals.handle(
+                platform, self.callback(platform, pending, "replace")
+            )
+            await self.curator.approvals.handle(
+                platform, self.callback(platform, pending, "back")
+            )
+            await self.curator.approvals.handle(
+                platform, self.private_text(platform, "متن ناخواسته")
+            )
+        self.assertEqual(self.store.topic(pending["id"])["text"], pending["text"])
+        self.assertFalse(
+            self.store.connection.execute("SELECT 1 FROM curator_replies").fetchone()
+        )
+
+    async def test_cross_bot_edits_and_approval_cannot_reuse_old_revision(self):
+        pending = self.pending()
+        await self.curator.approvals.sync_topic(pending["id"])
+        for platform in self.bots:
+            await self.curator.approvals.handle(
+                platform, self.callback(platform, pending, "edit")
+            )
+            await self.curator.approvals.handle(
+                platform, self.callback(platform, pending, "replace")
+            )
+        await asyncio.gather(
+            self.curator.approvals.handle(
+                "telegram", self.private_text("telegram", "خبر نخست")
+            ),
+            self.curator.approvals.handle("bale", self.private_text("bale", "خبر دوم")),
+        )
+        current = self.store.topic(pending["id"])
+        self.assertEqual(current["revision"], pending["revision"] + 1)
+        self.assertIn("خبر نخست", current["text"])
+        await self.curator.approvals.handle(
+            "bale", self.callback("bale", pending, "approve")
+        )
+        self.assertEqual(self.store.topic(pending["id"])["state"], "pending")
+
+    async def test_media_is_automatic_even_when_legacy_flag_was_disabled(self):
+        pending = self.pending()
+        self.store.connection.execute(
+            "UPDATE curator_topics SET media_enabled=0 WHERE id=?", (pending["id"],)
+        )
+        media = [
+            {
+                "kind": "photo",
+                "content": b"photo",
+                "properties": {"width": 10, "height": 10},
+            }
+        ]
+        with patch.object(
+            self.curator.publisher, "media", new=AsyncMock(return_value=media)
+        ):
+            await self.curator.approvals.sync_topic(pending["id"])
+            for bot in self.bots.values():
+                self.assertTrue(
+                    any(
+                        c[0] == "send_content" and c[2][0]["kind"] == "photo"
+                        for c in bot.calls
+                    )
+                )
+            self.store.decide(pending["id"], pending["revision"], "approve", "مدیر")
+            await self.curator.outbox_once()
+        for platform in self.bots:
+            self.assertEqual(self.channel_calls(platform)[0][2][0]["kind"], "photo")
+
+    async def test_all_admin_ui_lines_and_buttons_start_with_persian(self):
+        pending = self.pending()
+        await self.curator.approvals.sync_topic(pending["id"])
+        for platform in self.bots:
+            chat = 111 if platform == "telegram" else 222
+            await self.curator.approvals.status(platform, chat)
+            await self.curator.approvals.handle(
+                platform, self.callback(platform, pending, "edit")
+            )
+            await self.curator.approvals.handle(
+                platform, self.callback(platform, pending, "replace")
+            )
+            await self.curator.approvals.handle(
+                platform, self.private_text(platform, "متن " * 1500)
+            )
+            await self.curator.approvals.handle(
+                platform, self.callback(platform, pending, "back")
+            )
+        await self.curator.event({"kind": "challenge", "reason": "rate limit exceeded"})
+        await self.curator.admin_once()
+        for bot in self.bots.values():
+            for event in bot.calls:
+                if event[0] == "send_content":
+                    for item in event[2]:
+                        self.assert_persian_lines(item["text"], post=True)
+                elif event[0] in {"sendMessage", "editMessageText"}:
+                    self.assert_persian_lines(event[1]["text"])
+                    for row in (
+                        event[1].get("reply_markup", {}).get("inline_keyboard", [])
+                    ):
+                        for button in row:
+                            self.assert_persian_lines(button["text"])
+
+    async def test_recover_refreshes_old_controls_and_discards_removed_workflow(self):
+        pending = self.pending()
+        await self.curator.approvals.sync_topic(pending["id"])
+        self.store.connection.execute(
+            "INSERT INTO curator_replies VALUES('telegram',111,999,?,?,?)",
+            (pending["id"], pending["revision"], "regen"),
+        )
+        self.store.enqueue("regenerate", {"topic_id": pending["id"]})
+        self.store.connection.execute(
+            "UPDATE curator_topics SET state='researching' WHERE id=?", (pending["id"],)
+        )
+        self.store.recover()
+        self.assertEqual(self.store.topic(pending["id"])["state"], "pending")
+        self.assertFalse(
+            self.store.connection.execute("SELECT 1 FROM curator_replies").fetchone()
+        )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT state FROM curator_tasks WHERE kind='regenerate'"
+            ).fetchone()[0],
+            "cancelled",
+        )
+        await self.curator.outbox_once()
+        markup = self.curator.approvals.buttons(self.store.topic(pending["id"]))
+        self.assertEqual(len([b for row in markup["inline_keyboard"] for b in row]), 3)
+
     async def test_same_topic_from_different_accounts_creates_one_draft(self):
         for p in (post(), post("102", "different_account")):
             self.store.add_post(p, self.conf)
@@ -211,7 +526,7 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0],
             1,
         )
-        self.assertEqual(len(self.store.sources(1)), 2)
+        self.assertEqual(len(self.store.sources(1)), 1)
         self.assertEqual(self.researcher.await_count, 1)
         self.assertEqual(
             json.loads(
@@ -286,16 +601,7 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         async def evaluate(state, questions):
-            return {
-                key: (
-                    0.95
-                    if key == "is_same_topic"
-                    else 0
-                    if key == "has_important_new_info"
-                    else 0.9
-                )
-                for key in questions
-            }
+            return {key: (0.95 if key == "is_same_topic" else 0.9) for key in questions}
 
         self.curator.researcher = research_with_pause
         self.llm.topic.side_effect = extract
@@ -315,10 +621,12 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0],
             1,
         )
-        self.assertEqual(len(self.store.sources(1)), 2)
+        self.assertEqual(len(self.store.sources(1)), 1)
 
     async def test_research_topic_rechecked_and_merged_before_preview(self):
         existing = self.pending()
+        await self.curator.approvals.sync_topic(existing["id"])
+        calls_before = {p: len(bot.calls) for p, bot in self.bots.items()}
         candidate = post("102", text="Different initial interpretation")
         self.store.add_post(candidate, self.conf)
         self.llm.topic.side_effect = [
@@ -328,7 +636,17 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
         await self.curator.process_post(candidate)
         self.assertEqual(self.store.topic(2)["state"], "merged")
         self.assertEqual(self.store.topic(2)["merged_into"], existing["id"])
-        self.assertEqual(len(self.store.sources(existing["id"])), 2)
+        self.assertEqual(len(self.store.sources(existing["id"])), 1)
+        self.assertEqual(self.store.stats(self.conf)["today"]["duplicate"], 1)
+        await self.curator.outbox_once()
+        self.assertEqual(
+            calls_before, {p: len(bot.calls) for p, bot in self.bots.items()}
+        )
+        self.assertFalse(
+            self.store.connection.execute(
+                "SELECT 1 FROM curator_previews WHERE topic_id=2"
+            ).fetchone()
+        )
         self.assertEqual(
             self.store.connection.execute(
                 "SELECT COUNT(*) FROM curator_topics WHERE state='pending'"
@@ -350,6 +668,7 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
                 reserve(self.store, "101"), reserve(second, "102")
             )
             self.assertEqual(ids[0], ids[1])
+            self.assertEqual(len(self.store.sources(ids[0])), 1)
         finally:
             second.close()
 
@@ -367,7 +686,9 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
         for platform in self.bots:
             self.assertEqual(len(self.channel_calls(platform)), 1)
             edits = [c for c in self.bots[platform].calls if c[0] == "editMessageText"]
-            self.assertTrue(any("in Telegram" in c[1]["text"] for c in edits))
+            self.assertTrue(
+                any("تأیید توسط کاربر 111 در تلگرام" in c[1]["text"] for c in edits)
+            )
         self.assertEqual(self.store.topic(pending["id"])["state"], "published")
 
     async def test_partial_failure_retry_only_failed_platform(self):
@@ -378,6 +699,20 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.topic(pending["id"])["state"], "partial")
         await self.curator.approvals.sync_topic(pending["id"])
         current = self.store.topic(pending["id"])
+        self.assertEqual(self.curator.approvals.buttons(current)["inline_keyboard"], [])
+        await self.curator.approvals.status("telegram", 111)
+        status = [c[1] for c in self.bots["telegram"].calls if c[0] == "sendMessage"][
+            -1
+        ]
+        retry_buttons = [
+            b
+            for row in status["reply_markup"]["inline_keyboard"]
+            for b in row
+            if "retry_" in b["callback_data"]
+        ]
+        self.assertEqual(len(retry_buttons), 1)
+        self.assertTrue(retry_buttons[0]["callback_data"].endswith(":retry_bale"))
+        self.assert_persian_lines(retry_buttons[0]["text"])
         self.bots["bale"].fail_channel = False
         await self.curator.approvals.handle(
             "telegram", self.callback("telegram", current, "retry_bale")
@@ -387,33 +722,23 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.channel_calls("bale")), 2)
         self.assertEqual(self.store.topic(pending["id"])["state"], "published")
 
-    async def test_published_regeneration_updates_preview_without_republishing(self):
+    async def test_published_topic_cannot_be_edited_or_rewritten(self):
         pending = self.pending()
         self.store.decide(pending["id"], pending["revision"], "approve", "Admin")
         await self.curator.outbox_once()
         current = self.store.topic(pending["id"])
-        await self.curator.approvals.handle(
-            "telegram", self.callback("telegram", current, "regen")
-        )
-        prompt = self.store.connection.execute(
-            "SELECT message_id FROM curator_replies WHERE mode='regen'"
-        ).fetchone()[0]
-        await self.curator.approvals.handle(
-            "telegram",
-            {
-                "message": {
-                    "message_id": 999,
-                    "chat": {"id": 111, "type": "private"},
-                    "from": {"id": 111},
-                    "reply_to_message": {"message_id": prompt},
-                    "text": "/skip",
-                }
-            },
+        for action in ("edit", "regen", "rewrite"):
+            await self.curator.approvals.handle(
+                "telegram", self.callback("telegram", current, action)
+            )
+        self.assertEqual(self.curator.approvals.buttons(current)["inline_keyboard"], [])
+        self.assertFalse(
+            self.store.connection.execute("SELECT 1 FROM curator_replies").fetchone()
         )
         await self.curator.pipeline_once()
         await self.curator.outbox_once()
         self.assertEqual(self.store.topic(pending["id"])["state"], "published")
-        self.assertGreater(
+        self.assertEqual(
             self.store.topic(pending["id"])["revision"], current["revision"]
         )
         self.assertEqual(len(self.channel_calls("telegram")), 1)
@@ -478,16 +803,27 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
             await self.curator.approvals.message("bale", 222, "Draft")
         self.assertFalse(any(c[0] == "sendMessage" for c in self.bots["bale"].calls))
 
-    async def test_toggle_invalidates_stale_approve(self):
+    async def test_three_persian_buttons_and_removed_controls_are_ignored(self):
         pending = self.pending()
         await self.curator.approvals.sync_topic(pending["id"])
-        await self.curator.approvals.handle(
-            "telegram", self.callback("telegram", pending, "media")
+        for platform in self.bots:
+            messages = [
+                c[1] for c in self.bots[platform].calls if c[0] == "sendMessage"
+            ]
+            labels = [
+                b["text"]
+                for row in messages[-1]["reply_markup"]["inline_keyboard"]
+                for b in row
+            ]
+            self.assertEqual(labels, ["✅ تأیید", "❌ لغو", "✏️ ویرایش"])
+            for action in ("media", "regen"):
+                await self.curator.approvals.handle(
+                    platform, self.callback(platform, pending, action)
+                )
+        self.assertTrue(self.store.topic(pending["id"])["media_enabled"])
+        self.assertEqual(
+            self.store.topic(pending["id"])["revision"], pending["revision"]
         )
-        await self.curator.approvals.handle(
-            "bale", self.callback("bale", pending, "approve")
-        )
-        self.assertFalse(self.store.topic(pending["id"])["media_enabled"])
         self.assertEqual(self.store.topic(pending["id"])["state"], "pending")
 
     async def test_edit_reply_updates_both_previews(self):
@@ -495,6 +831,9 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
         await self.curator.approvals.sync_topic(pending["id"])
         await self.curator.approvals.handle(
             "telegram", self.callback("telegram", pending, "edit")
+        )
+        await self.curator.approvals.handle(
+            "telegram", self.callback("telegram", pending, "replace")
         )
         prompt = self.store.connection.execute(
             "SELECT message_id FROM curator_replies"
@@ -536,7 +875,7 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
         for bot in self.bots.values():
             self.assertTrue(
                 any(
-                    c[0] == "sendMessage" and "unusual activity" in c[1]["text"]
+                    c[0] == "sendMessage" and "فعالیت یا ورود غیرعادی" in c[1]["text"]
                     for c in bot.calls
                 )
             )
@@ -548,12 +887,12 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
         original = self.bots["bale"].call
 
         async def approve_during_preview(method, params, **kwargs):
-            if method == "sendMessage" and params["text"].startswith("Draft #"):
+            if method == "sendMessage" and params["text"].startswith("پیش‌نویس شمارهٔ"):
                 self.store.decide(
                     pending["id"],
                     pending["revision"],
                     "approve",
-                    "Approved by 111 in Telegram",
+                    "تأیید توسط کاربر 111 در تلگرام",
                 )
             return await original(method, params, **kwargs)
 
@@ -566,14 +905,14 @@ class CuratorTests(unittest.IsolatedAsyncioTestCase):
         await self.curator.approvals.sync_topic(pending["id"])
         edits = [c for c in self.bots["bale"].calls if c[0] == "editMessageText"]
         self.assertTrue(
-            any("Approved by 111 in Telegram" in c[1]["text"] for c in edits)
+            any("تأیید توسط کاربر 111 در تلگرام" in c[1]["text"] for c in edits)
         )
 
-    async def test_new_sources_require_regeneration_before_media_is_reviewed(self):
+    async def test_duplicate_media_never_enters_review_or_approval_snapshot(self):
         pending = self.pending()
         self.store.add_post(post("102"), self.conf)
-        self.store.attach(pending["id"], "102")
-        self.assertEqual(len(self.store.sources(pending["id"])), 2)
+        await self.curator.process_post(post("102"))
+        self.assertEqual(len(self.store.sources(pending["id"])), 1)
         self.assertEqual(len(self.store.draft_sources(pending["id"])), 1)
         self.store.decide(pending["id"], pending["revision"], "approve", "Admin")
         snapshot = json.loads(
@@ -995,9 +1334,25 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                     return url + "\n" + quote
 
             self_called = []
-            result = await research(conf, llm, [original], mcp_factory=lambda c: MCP())
+            with patch(
+                "channel_sync.curator.research.tehran_date",
+                return_value="2026-10-20 (۱۴۰۵/۰۷/۲۸)",
+            ):
+                result = await research(
+                    conf, llm, [original], mcp_factory=lambda c: MCP()
+                )
             self.assertEqual(result["facts"], [fact])
             self.assertEqual(self_called, [("search", {"query": "release"})])
+            writer_system = llm.chat.call_args_list[-1].args[0][0]["content"]
+            self.assertTrue(
+                writer_system.endswith("Current date: 2026-10-20 (۱۴۰۵/۰۷/۲۸)\n---")
+            )
+            self.assertIn("## Persian (RTL) Formatting Rule", writer_system)
+            self.assertIn(
+                "The hashtag line and the 🔗 link lines from the examples are allowed exceptions.",
+                writer_system,
+            )
+            self.assertNotIn("{{date}}", writer_system)
             history = llm.chat.call_args_list[1].args[0]
             self.assertTrue(
                 any(
@@ -1094,7 +1449,9 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["content"], "OK")
             finally:
                 await llm.aclose()
-            with patch("channel_sync.curator.research.httpx.AsyncClient") as constructor:
+            with patch(
+                "channel_sync.curator.research.httpx.AsyncClient"
+            ) as constructor:
                 http_client(
                     replace(
                         conf,

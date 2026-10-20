@@ -154,9 +154,10 @@ events remain permanent; other exact keys and semantic comparisons expire after
 measured from topic creation. Retained audit rows are not deleted on expiration.
 Topic reservation and post-research rechecking use a serialized semantic check
 and short `BEGIN IMMEDIATE` transactions. No SQL transaction spans an await.
-Additional sources attach to the existing topic, with a regeneration offer
-when jev detects substantive new information. Their media enters the reviewed
-draft through regeneration; attaching a source never silently changes its preview.
+Matching posts are skipped silently in every state, including after the research
+recheck. The existing draft and source list stay unchanged. Only the topic ID
+and post ID are logged, and the post is counted as `duplicate` in daily stats.
+There is no new-information evaluation, notification, or regeneration offer.
 
 ## Approval and CLI
 
@@ -172,22 +173,39 @@ draft through regeneration; attaching a source never silently changes its previe
 enqueues its input for that service; otherwise it processes the durable queue
 locally and sends previews without starting any bot poller. Run the service
 to receive button actions. Reusing a seen URL/identical manual input does not
-create another draft; use Regenerate on its existing topic instead.
+create another draft. To revise a pending draft, use its edit menu.
 
 In either bot, `/curator`, `/curator pause`, `/curator resume`, and
 `/curator pending` show status, today's counts and pending drafts. Preview
-messages contain the full text/media plus a separate control message with:
-Approve, Reject, Regenerate, Edit and Toggle media. Controls in both bots use
-the same SQLite state. Old revisions cannot approve a changed draft. Edit
-asks you to reply with complete corrected text. Regenerate asks for an optional
-instruction; reply `/skip` for none. Turning media off leaves the original
-source media stored and generates a text-only preview for publication.
+messages contain the full text/media plus a separate control message with
+exactly **✅ تأیید**, **❌ لغو**, and **✏️ ویرایش**. All admin-facing messages,
+status, errors, challenge alerts, and buttons are Persian; every line begins
+with a Persian word before any Latin term. Logs remain English.
 
-Approval freezes the reviewed text, revision, media choice and source list for
+The edit menu offers **✍️ ارسال متن جدید**, **🤖 دستور بازنویسی**, and
+**↩️ بازگشت**. Choose the first option to replace the text with your next
+private text message, or the second to supply a rewriting instruction to the
+LLM. A reply to the prompt is optional. Back cancels capture of the next message.
+Only one edit prompt per admin chat is active. Replacement or rewriting
+invalidates earlier revisions in both bots; the new preview needs approval.
+Approving or cancelling closes outstanding edit prompts across both bots.
+Original media is always included automatically when available; there is no
+media toggle or separate regeneration button. Terminal decisions cannot be
+edited through old buttons. Controls in both bots share SQLite state and
+publication remains idempotent.
+
+The writer system prompt ends with the supplied Persian RTL rule verbatim,
+with its date placeholder replaced on every writing call by the current
+Asia/Tehran Gregorian date and Jalali date with Persian digits, for example
+`2026-10-20 (۱۴۰۵/۰۷/۲۸)`. Hashtag lines and 🔗 link lines from the examples
+remain exceptions; code blocks are exempt. Signature lines receive a Persian
+lead such as `شناسه:` while retaining `CHANNEL_SIGNATURE` at the end.
+
+Approval freezes the reviewed text, revision and original source list for
 both destinations. Later source discoveries cannot change an in-progress send.
-Published-topic regeneration updates the admin preview only; it does not
-republish an already published topic. Known partial failures expose Retry
-publish for only the failed destination. Completed message parts are skipped
+Known partial failures expose Persian retry controls in `/curator` for only
+the failed destination, keeping draft previews limited to three buttons.
+Completed message parts are skipped
 after restart/retry. Explicit rate-limit rejections use bounded client retries;
 ambiguous timeouts/server responses become `uncertain` and require manual
 reconciliation, following the bridge's existing send journal. There is no

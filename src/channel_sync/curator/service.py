@@ -7,6 +7,7 @@ import time
 
 from ..jev import JevClient
 from ..signatures import PayloadCodec
+from ..persian import challenge_alert
 from .approvals import Approvals
 from .publisher import Publisher
 from .reader import active_now, run_browser, tweet_url
@@ -96,12 +97,10 @@ class Curator:
             self.store.enqueue(
                 "alert",
                 {
-                    "text": "X reader stopped: "
-                    + event["reason"]
-                    + "\nResolve it manually with x-login, then resume.",
+                    "text": challenge_alert(event["reason"]),
                     "markup": {
                         "inline_keyboard": [
-                            [{"text": "Resume X reader", "callback_data": "c:resume"}]
+                            [{"text": "ادامهٔ خواندن", "callback_data": "c:resume"}]
                         ]
                     },
                 },
@@ -185,23 +184,7 @@ class Curator:
             )
 
     async def duplicate(self, topic, post):
-        existing_posts = self.store.sources(topic["id"])
-        attached = self.store.attach(topic["id"], post["id"])
-        if attached:
-            scores = await self.jev.evaluate(
-                {
-                    "new_post": post,
-                    "existing_sources": existing_posts,
-                    "current_draft": topic["text"],
-                },
-                {"has_important_new_info": questions()["has_important_new_info"]},
-            )
-            log.info("Curator new-source topic=%s scores=%s", topic["id"], scores)
-            if (
-                scores["has_important_new_info"]
-                >= self.config.curator_relevance_threshold
-            ):
-                await self.approvals.source_notice(topic)
+        log.info("Curator duplicate skipped topic=%s post=%s", topic["id"], post["id"])
         self.store.post_done(post["id"], "duplicate")
 
     async def process_post(self, post):
@@ -237,10 +220,10 @@ class Curator:
                 if is_duplicate:
                     await self.duplicate(self.store.topic(topic_id), post)
                     return
-        await self.generate(topic_id)
-        self.store.post_done(post["id"], "drafted", scores)
+        if await self.generate(topic_id):
+            self.store.post_done(post["id"], "drafted", scores)
 
-    async def generate(self, topic_id, instruction="", preview_only=False):
+    async def generate(self, topic_id, instruction=""):
         posts = self.store.sources(topic_id)
         result = await self.researcher(
             self.config, self.llm, posts, instruction=instruction
@@ -255,16 +238,17 @@ class Curator:
             if duplicate:
                 self.store.add_key(duplicate["id"], refreshed)
                 self.store.merge(topic_id, duplicate["id"])
-                await self.approvals.source_notice(duplicate)
-                return
+                for post in posts:
+                    await self.duplicate(duplicate, post)
+                return False
             self.store.save_draft(
                 topic_id,
                 refreshed,
                 result,
                 sources=posts,
-                state="published" if preview_only else "pending",
             )
         log.info("Curator draft ready topic=%s", topic_id)
+        return True
 
     async def test_input(self, value):
         try:
@@ -309,7 +293,7 @@ class Curator:
 
     async def pipeline_once(self):
         task = self.store.connection.execute(
-            "SELECT * FROM curator_tasks WHERE kind IN ('input','regenerate') AND state='queued' ORDER BY id LIMIT 1"
+            "SELECT * FROM curator_tasks WHERE kind IN ('input','rewrite') AND state='queued' ORDER BY id LIMIT 1"
         ).fetchone()
         if task:
             self.store.connection.execute(
@@ -323,7 +307,6 @@ class Curator:
                     await self.generate(
                         payload["topic_id"],
                         payload.get("instruction", ""),
-                        payload.get("preview_only", False),
                     )
             except asyncio.CancelledError:
                 raise
@@ -333,16 +316,16 @@ class Curator:
                     "UPDATE curator_tasks SET state='error',error=? WHERE id=?",
                     (error, task["id"]),
                 )
-                if task["kind"] == "regenerate":
+                if task["kind"] == "rewrite":
                     self.store.connection.execute(
-                        "UPDATE curator_topics SET state=? WHERE id=?",
-                        (
-                            "published" if payload.get("preview_only") else "error",
-                            payload["topic_id"],
-                        ),
+                        "UPDATE curator_topics SET state='error' WHERE id=? AND state='researching'",
+                        (payload["topic_id"],),
                     )
                     self.store.dirty(payload["topic_id"])
-                await self.approvals.alert("Curator task failed: " + error[:700])
+                log.warning("Curator task failed id=%s error=%s", task["id"], error)
+                await self.approvals.alert(
+                    "خطا در انجام درخواست رخ داد؛ جزئیات در گزارش سرویس ثبت شده است."
+                )
             else:
                 self.store.connection.execute(
                     "UPDATE curator_tasks SET state='done' WHERE id=?", (task["id"],)
@@ -373,7 +356,9 @@ class Curator:
                 )
                 self.store.dirty(item[0])
             log.warning("Curator post failed id=%s error=%s", row["id"], error)
-            await self.approvals.alert("Curator draft failed: " + error[:700])
+            await self.approvals.alert(
+                "تهیهٔ پیش‌نویس ناموفق بود؛ جزئیات در گزارش سرویس ثبت شده است."
+            )
         return True
 
     async def pipeline_loop(self):
@@ -399,6 +384,18 @@ class Curator:
                 await self.approvals.handle(payload["platform"], payload["update"])
         except Exception as exc:
             log.warning("Curator admin action failed (%s)", type(exc).__name__)
+            if row["kind"] == "admin":
+                update = payload["update"]
+                if self.approvals.authorized(payload["platform"], update):
+                    message = (
+                        update.get("callback_query", {}).get("message")
+                        or update["message"]
+                    )
+                    await self.approvals.message(
+                        payload["platform"],
+                        message["chat"]["id"],
+                        "خطا در انجام این اقدام رخ داد؛ دوباره تلاش کنید.",
+                    )
         return True
 
     async def admin_loop(self):
@@ -415,7 +412,7 @@ class Curator:
                 row["topic_id"], row["platform"], retry_failed=True
             )
         topics = self.store.connection.execute(
-            "SELECT t.id FROM curator_topics t WHERE t.state!='researching' AND "
+            "SELECT t.id FROM curator_topics t WHERE t.state NOT IN ('researching','merged') AND "
             "(EXISTS(SELECT 1 FROM curator_previews p WHERE p.topic_id=t.id AND p.dirty=1) OR "
             "(SELECT COUNT(*) FROM curator_previews p WHERE p.topic_id=t.id)<?)",
             (

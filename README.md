@@ -13,6 +13,23 @@ permanent. `DRY_RUN=true` permits admin previews and prevents channel publicatio
 Browser crashes/hangs restart under a separate process watchdog; account
 challenges persistently stop reading until an explicit resume.
 
+Matching topics in any state are skipped silently: the curator logs the topic
+and post IDs and counts the post as `duplicate`, without attaching sources or
+notifying admins. All curator messages and controls in both bots are Persian,
+with a Persian word before any leading Latin term. Drafts have exactly three
+buttons: **✅ تأیید**, **❌ لغو**, and **✏️ ویرایش**. Editing opens **✍️ ارسال متن
+جدید**, **🤖 دستور بازنویسی**, and **↩️ بازگشت**. After choosing an edit mode,
+the next private text message supplies the replacement or LLM instruction;
+replying to the prompt is optional. New versions appear in both bots and need
+fresh approval. Original media is included automatically when available.
+Known partial-publication retries remain available through `/curator`.
+
+The writer prompt ends with the Persian RTL formatting rule and the current
+Asia/Tehran date in Gregorian and Jalali form. Hashtag lines, 🔗 link lines,
+and fenced code retain their formatting exceptions; the signature gets a
+Persian lead. Logs remain English. Moderation review alerts also use Persian
+labels while preserving the original comment.
+
 Stage two adds the `run` command. See [FORWARDING.md](FORWARDING.md) for direction
 flags, album handling, restart safety, and the live test protocol. The original
 diagnostics remain available below.
@@ -129,7 +146,7 @@ is restarted. `health` exits unsuccessfully for these setup or jev failures.
 `DRY_RUN=true` still classifies comments in `run` and logs decisions, but sends
 neither deletions nor review alerts. `moderate-test` prints all six scores and
 never polls, deletes, sends alerts, or writes decisions. An alert chat must
-allow the bot to send messages. Review alerts use plain English labels with
+allow the bot to send messages. Review alerts use Persian labels with
 the original comment and scores.
 
 SQLite's `moderation_decisions` records platform, chat/message/user IDs, text,

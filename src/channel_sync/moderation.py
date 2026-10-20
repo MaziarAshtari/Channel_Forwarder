@@ -137,12 +137,21 @@ class Moderator:
 
     async def alert(self, chat_id, message_id, user_id, text, scores):
         self.store.moderation_alert("telegram", chat_id, message_id, "sending")
-        body = (f"Moderation review: Telegram chat {chat_id}, message {message_id}, user {user_id}\n"
-                f"Scores: {json.dumps(scores, sort_keys=True)}\nComment: {text[:2500]}")
+        labels = {
+            "is_advertising": "تبلیغات", "is_hate_or_threat": "نفرت یا تهدید",
+            "is_profanity": "توهین", "is_scam_or_phishing": "کلاهبرداری یا فیشینگ",
+            "is_sexual": "محتوای جنسی", "should_delete": "پیشنهاد حذف",
+        }
+        score_text = "، ".join(f"{labels.get(key, 'ارزیابی')}: {value}" for key, value in sorted(scores.items()))
+        comment = "\n".join("دیدگاه: " + line for line in text[:2500].splitlines())
+        body = (f"بازبینی دیدگاه در تلگرام؛ گفتگو {chat_id}، پیام {message_id}، کاربر {user_id}\n"
+                f"امتیازها: {score_text}\n{comment}")
+        # Repeated line labels and emoji must still fit a Telegram text message.
+        body = self.redactor.text(body).encode("utf-16-le")[:7800].decode("utf-16-le", errors="ignore")
         try:
             # A concurrent forwarding/probe send may own this client's recorder.
             # Alert outcomes belong in the moderation audit, not its send journal.
-            await self.telegram.send_message(self.config.moderation_alert_chat_id, self.redactor.text(body),
+            await self.telegram.send_message(self.config.moderation_alert_chat_id, body,
                                              record_attempts=False)
         except asyncio.CancelledError:
             self.store.moderation_alert("telegram", chat_id, message_id, "uncertain")

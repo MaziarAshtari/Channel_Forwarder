@@ -19,7 +19,6 @@ def questions():
         "is_useful",
         "should_curate",
         "is_same_topic",
-        "has_important_new_info",
     }
     if not required <= data.keys() or any(
         q.get("type") != "noul"

@@ -136,7 +136,7 @@ class Publisher:
                                 data.extend(chunk)
                                 if len(data) > limit:
                                     raise ValueError(
-                                        "Original media exceeds transfer limit; disable media to publish text"
+                                        "Original media exceeds transfer limit"
                                     )
                             content = bytes(data)
                         await asyncio.to_thread(self.cache_bytes, path, content)
@@ -294,11 +294,7 @@ class Publisher:
             state, error = "dry_run", None
         else:
             try:
-                media = (
-                    await self.media(snapshot["posts"])
-                    if topic["media_enabled"]
-                    else []
-                )
+                media = await self.media(snapshot["posts"])
                 parts = publication_parts(topic["text"], media, platform)
                 chat_id = (
                     self.config.telegram_channel_id

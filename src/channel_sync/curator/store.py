@@ -101,9 +101,11 @@ class CuratorStore(BridgeStore):
                         now,
                     ),
                 ).lastrowid
-            db.execute(
-                "INSERT OR IGNORE INTO curator_sources VALUES(?,?)", (topic_id, post_id)
-            )
+            if not existing:
+                db.execute(
+                    "INSERT OR IGNORE INTO curator_sources VALUES(?,?)",
+                    (topic_id, post_id),
+                )
             self.add_key(topic_id, topic)
         return topic_id, bool(existing)
 
@@ -173,10 +175,6 @@ class CuratorStore(BridgeStore):
                 self.add_key(target, dict(row))
             db.execute("DELETE FROM curator_topic_keys WHERE topic_id=?", (source,))
             db.execute(
-                "INSERT OR IGNORE INTO curator_sources SELECT ?,post_id FROM curator_sources WHERE topic_id=?",
-                (target, source),
-            )
-            db.execute(
                 "UPDATE curator_topics SET state='merged',merged_into=?,updated_at=? WHERE id=?",
                 (target, time.time(), source),
             )
@@ -221,17 +219,32 @@ class CuratorStore(BridgeStore):
                     "UPDATE curator_topics SET state='rejected',actor=?,updated_at=? WHERE id=?",
                     (actor, time.time(), topic_id),
                 )
-            elif action == "media":
-                db.execute(
-                    "UPDATE curator_topics SET media_enabled=1-media_enabled,revision=revision+1 WHERE id=?",
-                    (topic_id,),
-                )
             else:
                 return False
             self.dirty(topic_id)
         return True
 
     def recover(self):
+        # Removed controls must not be revived by a restart or old bot messages.
+        self.connection.execute(
+            "DELETE FROM curator_replies WHERE mode NOT IN ('menu','replace','rewrite')"
+        )
+        for row in self.connection.execute(
+            "SELECT payload_json FROM curator_tasks WHERE kind='regenerate' AND state IN ('queued','working')"
+        ).fetchall():
+            payload = json.loads(row[0])
+            self.connection.execute(
+                "UPDATE curator_topics SET state=?,revision=revision+1 WHERE id=? AND state='researching'",
+                (
+                    "published" if payload.get("preview_only") else "pending",
+                    payload["topic_id"],
+                ),
+            )
+        self.connection.execute(
+            "UPDATE curator_tasks SET state='cancelled' WHERE kind='regenerate' AND state IN ('queued','working')"
+        )
+        # Refresh persisted English controls and removed buttons on upgrade.
+        self.connection.execute("UPDATE curator_previews SET dirty=1")
         self.connection.execute(
             "UPDATE curator_tasks SET state='queued' WHERE state='working'"
         )
