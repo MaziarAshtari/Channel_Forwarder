@@ -7,7 +7,7 @@ name = "channel-sync"
 version = "0.1.0"
 description = "Telegram/Bale channel bridge diagnostics and durable foundations"
 requires-python = ">=3.11"
-dependencies = ["httpx[socks]==0.28.1", "python-dotenv==1.2.4"]
+dependencies = ["httpx[socks]==0.28.1", "python-dotenv==1.2.4", "playwright==1.64.0", "mcp==1.26.0", "psutil==7.2.2", "jsonschema==4.26.0"]
 
 [project.scripts]
 channel-sync = "channel_sync.cli:main"
@@ -16,4 +16,4 @@ channel-sync = "channel_sync.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-channel_sync = ["schema.sql", "moderation_questions.json", "assets/*.png"]
+channel_sync = ["schema.sql", "moderation_questions.json", "curator_questions.json", "assets/*.png"]

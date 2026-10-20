@@ -6,13 +6,13 @@ from pathlib import Path
 import time
 
 from .bridge_store import BridgeStore, SCOPE
-from .clients import ApiError
+from .clients import ApiError, client_write_lock, TelegramClient, BaleClient
 from .formatting import RichText, bale_to_telegram, convert, escape_bale
 from .health import health
 from .media import FileTooLarge, download_attachment, media_kind, stable_properties
 from .messages import extract_message, own_author
 from .moderation import Moderator
-from .redaction import Redactor
+from .redaction import Redactor, config_secrets
 from .reports import save_report
 from .signatures import PayloadCodec, echo_signature
 from .store import CircuitOpen
@@ -40,10 +40,29 @@ class Bridge:
         self.enabled = {"telegram": config.telegram_to_bale_enabled, "bale": config.bale_to_telegram_enabled}
         self.bot_ids = {}
         self.codec = PayloadCodec(config)
-        self.redactor = Redactor(config.telegram_token, config.bale_token, config.telegram_proxy_url,
-                                 config.typesafe_api_key)
+        self.redactor = Redactor(*config_secrets(config))
         self.moderator = Moderator(config, clients.get("telegram"), store)
-        self.stop_on_error, self.new_posts_only, self.output = stop_on_error, new_posts_only, output
+        self.curator = None
+        self.curator_write_clients = {}
+        if config.curator_enabled:
+            from .curator.service import Curator
+            from .curator.store import CuratorStore
+
+            self.curator_store = CuratorStore(config.database_path, self.redactor)
+            # Separate HTTP pools/recorders keep slow curator writes and retries
+            # independent. Only the existing main clients ever poll updates.
+            self.curator_write_clients = {
+                "telegram": TelegramClient(config.telegram_token, config),
+                "bale": BaleClient(config.bale_token, config),
+            }
+            self.curator = Curator(
+                config, self.curator_write_clients, self.curator_store
+            )
+        self.stop_on_error, self.new_posts_only, self.output = (
+            stop_on_error,
+            new_posts_only,
+            output,
+        )
         self.ready = {platform: asyncio.Event() for platform in clients}
         self.wakeup, self.stop = asyncio.Event(), asyncio.Event()
         self.started = False
@@ -114,6 +133,11 @@ class Bridge:
         self.wakeup.set()
 
     async def moderate_inbox(self, platform):
+        if self.curator:
+            try:
+                self.curator.route_inbox(platform)
+            except Exception as exc:
+                log.error('Curator inbox unavailable (%s); bridge continues',type(exc).__name__)
         if not self.config.moderation_enabled or platform != "telegram":
             return
         for row in self.store.pending_updates(platform):
@@ -205,6 +229,10 @@ class Bridge:
         return {item["kind"]: [info] if item["kind"] == "photo" else info, "caption": item["text"]}
 
     async def transmit(self, key, target, items, *, job_key):
+        async with client_write_lock(self.clients[target]):
+            return await self._transmit_locked(key,target,items,job_key=job_key)
+
+    async def _transmit_locked(self, key, target, items, *, job_key):
         existing = self.store.send(key)
         if existing:
             if existing["status"] == "sent":
@@ -319,6 +347,23 @@ class Bridge:
                 except TimeoutError:
                     pass
 
+    async def run_curator(self):
+        try:
+            await self.curator.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.error(
+                "Curator stopped (%s); bridge and moderation continue",
+                type(exc).__name__,
+            )
+        finally:
+            await self.curator.aclose()
+            await asyncio.gather(
+                *(client.aclose() for client in self.curator_write_clients.values()),
+                return_exceptions=True,
+            )
+
     async def run(self):
         tasks = []
         try:
@@ -346,6 +391,8 @@ class Bridge:
                 raise RuntimeError("A direction is paused; inspect status before live tests")
             tasks = [asyncio.create_task(self.poll(platform, client)) for platform, client in self.clients.items()]
             tasks.append(asyncio.create_task(self.work()))
+            if self.curator:
+                tasks.append(asyncio.create_task(self.run_curator()))
             if self.session_control:
                 tasks.append(asyncio.create_task(self.supervise()))
             await asyncio.gather(*tasks)
@@ -362,6 +409,11 @@ class Bridge:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             await self.moderator.aclose()
+            if self.curator:
+                if not self.started:
+                    await self.curator.aclose()
+                    await asyncio.gather(*(client.aclose() for client in self.curator_write_clients.values()),return_exceptions=True)
+                self.curator_store.close()
             self.report["finished_at"] = datetime.now(timezone.utc).isoformat()
             self.report["database"] = self.store.snapshot()
             self.checkpoint()

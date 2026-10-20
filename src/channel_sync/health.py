@@ -106,7 +106,7 @@ async def health_one(client: BotClient, chat_id: int) -> dict:
     return result
 
 
-async def health(clients: dict[str, BotClient], channel_ids: dict[str, int], *,
+async def _health(clients: dict[str, BotClient], channel_ids: dict[str, int], *,
                  check_moderation=True, jev_client: JevClient | None = None) -> dict:
     results = await asyncio.gather(*(health_one(client, channel_ids[platform])
                                      for platform, client in clients.items()))
@@ -130,4 +130,14 @@ async def health(clients: dict[str, BotClient], channel_ids: dict[str, int], *,
                             "jev": jev, "telegram": group,
                             "bale": {"supported": False, "status": "unsupported", "warning": BALE_MODERATION_WARNING}}
     report["ok"] = report["ok"] and report["moderation"]["ok"]
+    return report
+
+
+async def health(clients, channel_ids, *, check_moderation=True, jev_client=None):
+    report = await _health(clients,channel_ids,check_moderation=check_moderation,jev_client=jev_client)
+    config = clients['telegram'].config
+    if check_moderation and config.curator_enabled:
+        from .curator.health import curator_health
+        report['curator'] = await curator_health(config,clients)
+        report['ok'] = report['ok'] and report['curator']['ok']
     return report

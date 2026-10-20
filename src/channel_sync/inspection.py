@@ -10,7 +10,7 @@ from .config import Config
 from .health import health
 from .messages import content_signature, extract_message, own_author, utf16_length
 from .moderation import Moderator
-from .redaction import Redactor
+from .redaction import Redactor, config_secrets
 from .reports import save_report
 from .store import CircuitOpen, Store
 
@@ -108,8 +108,7 @@ def analyze_echoes(report: dict) -> dict:
 async def inspect_echo(config: Config, clients: dict[str, BotClient], store: Store,
                        output: Path, *, observation_seconds: float = 60) -> dict:
     run_id = uuid.uuid4().hex[:12]
-    redactor = Redactor(config.telegram_token, config.bale_token, config.telegram_proxy_url,
-                        config.typesafe_api_key)
+    redactor = Redactor(*config_secrets(config))
     channel_ids = {"telegram": config.telegram_channel_id, "bale": config.bale_channel_id}
     report = {"schema_version": 1, "run_id": run_id, "started_at": utc_now(),
               "status": "starting", "dry_run": config.dry_run, "observation_seconds": observation_seconds,

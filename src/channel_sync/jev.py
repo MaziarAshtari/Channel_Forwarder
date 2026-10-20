@@ -32,12 +32,12 @@ def load_questions() -> dict:
     return questions
 
 
-def parse_scores(payload: dict) -> dict[str, float]:
+def parse_scores(payload: dict, question_ids=None) -> dict[str, float]:
     answers = payload.get("answers") if isinstance(payload, dict) else None
     if not isinstance(answers, dict):
         raise ValueError("Missing jev answers.")
     scores = {}
-    for key in sorted(QUESTION_IDS):
+    for key in sorted(QUESTION_IDS if question_ids is None else question_ids):
         answer = answers.get(key)
         value = answer.get("noul") if isinstance(answer, dict) else None
         if (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -60,12 +60,14 @@ class JevClient:
         await self.http.aclose()
 
     async def classify(self, text: str) -> dict[str, float]:
+        return await self.evaluate({"comment": text, "channel_topic": self.config.moderation_channel_topic,
+                                    "comment_language": "Persian or English"}, self.questions)
+
+    async def evaluate(self, state: dict, questions: dict) -> dict[str, float]:
         if not self.config.typesafe_api_key:
             raise ApiError("jev", "systemone", "Set TYPESAFE_API_KEY in .env.")
         body = {"model": self.config.jev_model,
-                "state": {"comment": text, "channel_topic": self.config.moderation_channel_topic,
-                          "comment_language": "Persian or English"},
-                "questions": self.questions}
+                "state": state, "questions": questions}
         for attempt in range(self.config.retry_attempts):
             retry_after = 0.0
             try:
@@ -77,7 +79,7 @@ class JevClient:
             else:
                 if response.is_success:
                     try:
-                        return parse_scores(response.json())
+                        return parse_scores(response.json(), questions)
                     except ValueError:
                         error = ApiError("jev", "systemone", "Invalid evaluation response",
                                          code=response.status_code, temporary=True)

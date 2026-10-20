@@ -3,12 +3,45 @@ import re
 from urllib.parse import quote
 
 
+def config_secrets(config):
+    values = [
+        config.telegram_token,
+        config.bale_token,
+        config.telegram_proxy_url,
+        config.typesafe_api_key,
+        config.llm_api_key,
+        config.x_proxy_url,
+    ]
+    values += [
+        v
+        for k, v in config.env_values.items()
+        if any(
+            word in k.upper()
+            for word in ("KEY", "TOKEN", "PASSWORD", "SECRET", "AUTH", "PROXY_URL")
+        )
+    ]
+    try:
+        references = re.findall(
+            r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
+            config.mcp_servers_path.read_text(encoding="utf-8"),
+        )
+        values += [config.env_values.get(key) for key in references]
+    except (OSError,UnicodeError):
+        pass
+    return values
+
+
 class Redactor:
     def __init__(self, *secrets: str | None):
         self.secrets = sorted(
-            {variant for secret in secrets if secret
-             for variant in (secret, quote(secret, safe=""))},
-            key=len, reverse=True,
+            {
+                variant
+                for secret in secrets
+                if secret
+                for variant in (secret, quote(secret, safe=""))
+            },
+            key=len,
+            reverse=True,
         )
 
     def text(self, value: str) -> str:

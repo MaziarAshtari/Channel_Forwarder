@@ -14,3 +14,7 @@ reports/
 *.sqlite3-wal
 *.sqlite3-shm
 *.log
+# Persistent Chrome profiles contain X account session credentials.
+x-profile/
+chrome-profile/
+browser-profile/

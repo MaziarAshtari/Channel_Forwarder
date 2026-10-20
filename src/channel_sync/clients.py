@@ -9,13 +9,19 @@ from urllib.parse import quote
 import httpx
 
 from .config import Config
-from .redaction import Redactor
+from .redaction import Redactor, config_secrets
 
 log = logging.getLogger(__name__)
 DOWNLOAD_LIMIT = 20 * 1024 * 1024
 UPLOAD_LIMIT = 50 * 1024 * 1024
 PHOTO_LIMIT = 10 * 1024 * 1024
 READ_METHODS = {"getMe", "getChat", "getChatMember", "getFile", "getWebhookInfo", "getUpdates"}
+
+
+def client_write_lock(client):
+    if not hasattr(client, 'write_lock'):
+        client.write_lock = asyncio.Lock()
+    return client.write_lock
 
 
 class ApiError(RuntimeError):
@@ -46,8 +52,7 @@ class BotClient:
 
     def __init__(self, token: str, config: Config, *, transport=None, sleeper=asyncio.sleep):
         self.config = config
-        self.redactor = Redactor(config.telegram_token, config.bale_token, config.telegram_proxy_url,
-                                 config.typesafe_api_key)
+        self.redactor = Redactor(*config_secrets(config))
         self._base_url = f"{self.host}/bot{token}"
         self._file_url = f"{self.host}/file/bot{token}"
         self.http = make_http_client(config, self.platform, transport=transport)
@@ -146,6 +151,10 @@ class BotClient:
             params["allowed_updates"] = ["channel_post"]
             if self.config.moderation_enabled:
                 params["allowed_updates"].append("message")
+            if self.config.curator_enabled:
+                if 'message' not in params['allowed_updates']:
+                    params['allowed_updates'].append('message')
+                params['allowed_updates'].append('callback_query')
         # Bale's allowed_updates is undocumented; do not send it.
         return await self.call("getUpdates", params)
 

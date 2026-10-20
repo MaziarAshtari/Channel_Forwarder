@@ -5,7 +5,7 @@ import logging
 from .clients import ApiError
 from .health import BALE_MODERATION_WARNING, discussion_health
 from .jev import JevClient
-from .redaction import Redactor
+from .redaction import Redactor, config_secrets
 
 log = logging.getLogger(__name__)
 
@@ -17,8 +17,7 @@ class Moderator:
         self.group_id = config.telegram_discussion_group_id
         self.bot_id = None
         self.can_delete = False
-        self.redactor = Redactor(config.telegram_token, config.bale_token, config.telegram_proxy_url,
-                                 config.typesafe_api_key)
+        self.redactor = Redactor(*config_secrets(config))
 
     async def prepare(self, channel_health) -> dict:
         if not self.config.moderation_enabled:

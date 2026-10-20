@@ -1,0 +1,15 @@
+{
+  "servers": {},
+  "examples": {
+    "search_http": {
+      "type": "streamable_http", "url": "${SEARCH_MCP_URL}",
+      "headers": {"Authorization": "Bearer ${SEARCH_MCP_API_KEY}"},
+      "tools": ["search", "fetch"]
+    },
+    "search_stdio": {
+      "type": "stdio", "command": "${SEARCH_MCP_COMMAND}", "args": [],
+      "env": {"SEARCH_API_KEY": "${SEARCH_API_KEY}"},
+      "tools": ["search", "fetch"]
+    }
+  }
+}

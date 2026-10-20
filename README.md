@@ -1,6 +1,18 @@
 # channel-sync
 
 Telegram ↔ Bale channel mirror with durable forwarding and echo diagnostics.
+An optional AI news curator reads X through headed Google Chrome, researches
+AI/technology topics, and sends Persian drafts to both bots for admin approval.
+See [CURATOR.md](CURATOR.md) for configuration, the approval workflow, exact
+Ubuntu deployment steps and manual X login through Xvfb/VNC on a headless server.
+
+The curator defaults to disabled. Its defaults use Asia/Tehran, 09:00–23:30,
+400 captured posts/day, 10–25-minute sessions and 30–90-minute breaks. Topic
+deduplication lasts 30 days, except explicit versioned release keys remain
+permanent. `DRY_RUN=true` permits admin previews and prevents channel publication.
+Browser crashes/hangs restart under a separate process watchdog; account
+challenges persistently stop reading until an explicit resume.
+
 Stage two adds the `run` command. See [FORWARDING.md](FORWARDING.md) for direction
 flags, album handling, restart safety, and the live test protocol. The original
 diagnostics remain available below.
@@ -229,7 +241,9 @@ private, gitignored artifacts.
 ## Ubuntu deployment
 
 The forwarding worker is implemented; live phase results are recorded separately
-in STAGE2_REPORT.md. Server service configuration is not included yet. On Ubuntu, recreate
+in STAGE2_REPORT.md. The [curator deployment guide](CURATOR.md#ubuntu-deployment-with-existing-channel-syncservice)
+and [systemd drop-in](deploy/channel-sync-curator.conf) cover the existing
+`channel-sync.service`, Chrome and Xvfb. On Ubuntu, recreate
 the venv from the same requirements, transfer `.env` privately, and put SQLite on
 a persistent local disk and run `channel-sync run`. Do not share one bot with two
 polling processes. Normal run reports retain the latest 1000 events; SQLite
