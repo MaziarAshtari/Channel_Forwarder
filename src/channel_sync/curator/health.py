@@ -79,7 +79,11 @@ async def curator_health(config, clients):
 
     async def mcp_check():
         async with ResearchMCP(config) as mcp:
-            return {"ok": True, "tools": [t["function"]["name"] for t in mcp.tools]}
+            return {
+                "ok": True,
+                "tools": [t["function"]["name"] for t in mcp.tools],
+                "proxy_enabled": config.mcp_use_proxy,
+            }
 
     async def browser():
         state = store.reader()

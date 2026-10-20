@@ -1,15 +1,25 @@
 {
   "servers": {},
   "examples": {
+    "exa": {
+      "type": "streamable_http",
+      "url": "https://mcp.exa.ai/mcp?tools=agent_run",
+      "headers": {"x-api-key": "${EXA_API_KEY}"},
+      "tools": ["agent_run"],
+      "timeout_seconds": 600,
+      "poll_interval_seconds": 5
+    },
     "search_http": {
       "type": "streamable_http", "url": "${SEARCH_MCP_URL}",
       "headers": {"Authorization": "Bearer ${SEARCH_MCP_API_KEY}"},
-      "tools": ["search", "fetch"]
+      "tools": ["search", "fetch"],
+      "timeout_seconds": 600
     },
     "search_stdio": {
       "type": "stdio", "command": "${SEARCH_MCP_COMMAND}", "args": [],
       "env": {"SEARCH_API_KEY": "${SEARCH_API_KEY}"},
-      "tools": ["search", "fetch"]
+      "tools": ["search", "fetch"],
+      "timeout_seconds": 600
     }
   }
 }

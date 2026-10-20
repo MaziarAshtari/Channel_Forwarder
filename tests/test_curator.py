@@ -19,7 +19,8 @@ from channel_sync.bridge_store import SCOPE
 from channel_sync.clients import ApiError, TelegramClient
 from channel_sync.config import ConfigError, load_config
 from channel_sync.cli import main, process_lock
-from channel_sync.curator.mcp import ResearchMCP, load_servers, http_client
+from channel_sync.curator.mcp import ResearchMCP, load_servers
+from channel_sync.curator.research import http_client
 from channel_sync.curator.publisher import publication_parts, split_text
 from channel_sync.curator.reader import (
     active_now,
@@ -1093,7 +1094,7 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["content"], "OK")
             finally:
                 await llm.aclose()
-            with patch("channel_sync.curator.mcp.httpx.AsyncClient") as constructor:
+            with patch("channel_sync.curator.research.httpx.AsyncClient") as constructor:
                 http_client(
                     replace(
                         conf,

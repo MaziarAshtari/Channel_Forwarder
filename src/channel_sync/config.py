@@ -66,6 +66,7 @@ class Config:
     llm_model: str = ""
     llm_max_tool_rounds: int = 8
     llm_use_proxy: bool = False
+    mcp_use_proxy: bool = False
     admin_telegram_user_ids: tuple[int, ...] = ()
     admin_bale_user_ids: tuple[int, ...] = ()
     channel_signature: str = "🆔 @asrgooyeshpardaz"
@@ -293,6 +294,7 @@ def load_config(env_path: Path) -> Config:
         llm_model=value("LLM_MODEL"),
         llm_max_tool_rounds=integer("LLM_MAX_TOOL_ROUNDS", "8"),
         llm_use_proxy=boolean("LLM_USE_PROXY", "false"),
+        mcp_use_proxy=boolean("MCP_USE_PROXY", "false"),
         admin_telegram_user_ids=admin_ids("ADMIN_TELEGRAM_USER_IDS"),
         admin_bale_user_ids=admin_ids("ADMIN_BALE_USER_IDS"),
         channel_signature=value("CHANNEL_SIGNATURE", "🆔 @asrgooyeshpardaz"),

@@ -53,10 +53,12 @@ with no custom user agent, stealth plugins or fingerprint overrides.
 
 Chrome cannot use authenticated SOCKS proxies. If necessary, provide a local
 unauthenticated SOCKS relay through `X_PROXY_URL`. HTTP proxy credentials are
-supported. LLM and MCP HTTP use `TELEGRAM_PROXY_URL` only when
-`LLM_USE_PROXY=true`; system proxy variables are ignored. For stdio servers,
-this setting supplies explicit proxy environment variables, which the server
-must support. Bale always connects directly. Media downloads use the X proxy.
+supported. `LLM_USE_PROXY` controls only LLM HTTP. The independent
+`MCP_USE_PROXY` (default `false`) controls MCP HTTP and supplies explicit proxy
+environment variables to stdio servers, which the server must support. Both
+settings use `TELEGRAM_PROXY_URL`; MCP normalizes `socks5://` to `socks5h://`
+for remote DNS. System proxy variables are ignored. Bale always connects
+directly. Media downloads use the X proxy.
 
 ## MCP servers and research
 
@@ -72,7 +74,8 @@ own dependencies separately. Example:
       "type": "streamable_http",
       "url": "${SEARCH_MCP_URL}",
       "headers": {"Authorization": "Bearer ${SEARCH_MCP_API_KEY}"},
-      "tools": ["search", "fetch"]
+      "tools": ["search", "fetch"],
+      "timeout_seconds": 600
     }
   }
 }
@@ -85,6 +88,29 @@ from ambient shell variables. Missing references fail without printing values.
 Keep keys out of the JSON file. Server stderr is discarded to avoid accidental
 credential leakage. Only explicitly allowlisted tools, or tools annotated by
 the server as read-only when no allowlist is supplied, are exposed to the LLM.
+
+Each server's `timeout_seconds` defaults to `600` and sets both the HTTP read
+timeout and MCP session read timeout. It is independent of the shorter bot/LLM
+request timeout. Values must be positive finite numbers.
+
+For Exa Agent, fill `EXA_API_KEY` in `.env` and copy `examples.exa` from
+`mcp_servers.json` into `servers` as `exa`. It uses the real
+`https://mcp.exa.ai/mcp?tools=agent_run` endpoint with
+`"headers": {"x-api-key": "${EXA_API_KEY}"}`; no key belongs in JSON or URLs.
+The endpoint requires authentication even for tool discovery.
+
+Exa's [official agent_run implementation](https://github.com/exa-labs/exa-mcp-server/blob/main/src/tools/agentRun.ts)
+returns a JSON text envelope with `id`, `status`, `outputReady`, and `output`.
+When `status` is `running`, the curator waits `poll_interval_seconds` (default
+`5`) and calls the same tool with only `{"runId": "agent_run_..."}` until it
+completes or fails. One overall deadline of `timeout_seconds` covers the initial
+call, pauses, and every poll. Only completed output reaches the LLM; failures or
+deadline expiry produce an error. Run IDs and status are logged without tool
+arguments, headers, or upstream error text. The run is never automatically
+cancelled or restarted. Within one research operation, repeated/concurrent
+calls for the same normalized objective reuse the same run and cached outcome,
+including after a failure or an ambiguous timeout. A new research operation
+(for example, explicit regeneration) starts a new scope.
 
 The official `mcp` SDK is pinned to the tested 1.26 transport API. Both stdio
 and streamable HTTP support tool pagination and JSON Schema argument validation.
